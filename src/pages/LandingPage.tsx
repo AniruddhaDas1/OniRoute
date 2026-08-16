@@ -313,7 +313,20 @@ console.log(response.choices[0].message.content);`,
       {/* Footer */}
       <footer className="border-t border-slate-800/80 bg-slate-950 px-6 py-8">
         <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 text-xs text-slate-500">
-          <p>© {new Date().getFullYear()} OniRoute. Open-source self-hostable AI Gateway.</p>
+          <div className="space-y-1">
+            <p>© {new Date().getFullYear()} OniRoute. Designed &amp; Architected by <strong className="text-slate-300 font-semibold">Aniruddha Das</strong>.</p>
+            <p>
+              Powered by{' '}
+              <a
+                href="https://leadspree.in"
+                target="_blank"
+                rel="noreferrer"
+                className="text-violet-400 hover:text-violet-300 font-medium underline underline-offset-2 transition-colors"
+              >
+                Leadspree Business Solutions
+              </a>
+            </p>
+          </div>
           <div className="flex items-center gap-6">
             <Link to="/dashboard" className="hover:text-slate-300">
               Dashboard

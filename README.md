@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/images/oniroute-banner.svg" alt="OniRoute banner" width="100%">
+</p>
+
 <h1 align="center">OniRoute</h1>
 
 <p align="center">
@@ -6,6 +10,13 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
+  <a href="CODE_OF_CONDUCT.md"><img alt="Code of Conduct" src="https://img.shields.io/badge/code%20of%20conduct-Contributor%20Covenant-pink.svg"></a>
+  <a href="CONTRIBUTING.md"><img alt="Contributing" src="https://img.shields.io/badge/contributions-welcome-brightgreen.svg"></a>
+  <a href="SECURITY.md"><img alt="Security" src="https://img.shields.io/badge/security-policy-yellowgreen.svg"></a>
+  <a href="https://leadspree.in"><img alt="Powered by Leadspree" src="https://img.shields.io/badge/powered%20by-Leadspree%20Business%20Solutions-6366f1.svg"></a>
+</p>
+
+<p align="center">
   <img alt="Node 20+" src="https://img.shields.io/badge/node-20%2B-339933.svg">
   <img alt="TypeScript" src="https://img.shields.io/badge/typescript-5.8-3178c6.svg">
   <img alt="OpenAI Compatible" src="https://img.shields.io/badge/OpenAI-compatible-412991.svg">
@@ -15,9 +26,10 @@
 </p>
 
 <p align="center">
-  <a href="#quick-start"><img alt="Quick Start" src="https://img.shields.io/badge/quickstart-3%20minutes-green.svg"></a>
-  <a href="#universal-client-support"><img alt="Client Support" src="https://img.shields.io/badge/clients-Cursor%20%7C%20Python%20%7C%20LibreChat-blueviolet.svg"></a>
-  <a href="#architecture"><img alt="Architecture" src="https://img.shields.io/badge/architecture-local%20%2B%20cloud-informational.svg"></a>
+  <a href="https://github.com/AniruddhaDas1/OniRoute/stargazers"><img alt="GitHub Stars" src="https://img.shields.io/github/stars/AniruddhaDas1/OniRoute?style=social"></a>
+  <a href="https://github.com/AniruddhaDas1/OniRoute/forks"><img alt="GitHub Forks" src="https://img.shields.io/github/forks/AniruddhaDas1/OniRoute?style=social"></a>
+  <a href="https://github.com/AniruddhaDas1/OniRoute/issues"><img alt="GitHub Issues" src="https://img.shields.io/github/issues/AniruddhaDas1/OniRoute"></a>
+  <a href="https://github.com/AniruddhaDas1/OniRoute/commits/main"><img alt="GitHub Last Commit" src="https://img.shields.io/github/last-commit/AniruddhaDas1/OniRoute"></a>
 </p>
 
 ---
@@ -394,3 +406,14 @@ npm run verify
 ## 📄 License
 
 This project is licensed under the [MIT License](LICENSE).
+
+---
+
+## 👨‍💻 Author & Credits
+
+**OniRoute** is designed, architected, and maintained by **[Aniruddha Das](https://github.com/AniruddhaDas1)**.
+
+<p align="center">
+  <strong>Powered by <a href="https://leadspree.in" target="_blank">Leadspree Business Solutions</a></strong>
+</p>
+
