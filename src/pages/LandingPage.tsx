@@ -76,7 +76,7 @@ console.log(response.choices[0].message.content);`,
 
           <div className="flex items-center gap-4">
             <a
-              href="https://github.com"
+              href="https://github.com/AniruddhaDas1"
               target="_blank"
               rel="noreferrer"
               className="text-sm font-medium text-slate-400 transition-colors hover:text-white"
@@ -314,7 +314,18 @@ console.log(response.choices[0].message.content);`,
       <footer className="border-t border-slate-800/80 bg-slate-950 px-6 py-8">
         <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 text-xs text-slate-500">
           <div className="space-y-1">
-            <p>© {new Date().getFullYear()} OniRoute. Designed &amp; Architected by <strong className="text-slate-300 font-semibold">Aniruddha Das</strong>.</p>
+            <p>
+              © {new Date().getFullYear()} OniRoute. Designed &amp; Architected by{' '}
+              <a
+                href="https://github.com/AniruddhaDas1"
+                target="_blank"
+                rel="noreferrer"
+                className="text-slate-300 hover:text-white font-semibold underline underline-offset-2 transition-colors"
+              >
+                Aniruddha Das
+              </a>
+              .
+            </p>
             <p>
               Powered by{' '}
               <a
@@ -328,6 +339,14 @@ console.log(response.choices[0].message.content);`,
             </p>
           </div>
           <div className="flex items-center gap-6">
+            <a
+              href="https://github.com/AniruddhaDas1"
+              target="_blank"
+              rel="noreferrer"
+              className="hover:text-slate-300"
+            >
+              GitHub
+            </a>
             <Link to="/dashboard" className="hover:text-slate-300">
               Dashboard
             </Link>
