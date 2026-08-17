@@ -379,6 +379,9 @@ export function parseProviderStreamLine(provider, line) {
         if (json.type === 'message_stop') {
           return { done: true };
         }
+        if (json.type === 'error' || json.error) {
+          return { text: `\n\n[Anthropic Error: ${json.error?.message || 'Stream error'}]`, finishReason: 'stop', done: true };
+        }
       } catch {
         return null;
       }
@@ -391,6 +394,9 @@ export function parseProviderStreamLine(provider, line) {
       if (!dataStr) return null;
       try {
         const json = JSON.parse(dataStr);
+        if (json.error) {
+          return { text: `\n\n[Google Gemini Error: ${json.error.message || 'Stream error'}]`, finishReason: 'stop', done: true };
+        }
         const candidate = json.candidates?.[0];
         const text = (candidate?.content?.parts ?? []).map((p) => p.text ?? '').join('');
         const finish = candidate?.finishReason ? (candidate.finishReason === 'MAX_TOKENS' ? 'length' : 'stop') : null;
@@ -405,6 +411,9 @@ export function parseProviderStreamLine(provider, line) {
       if (dataStr === '[DONE]') return { done: true };
       try {
         const json = JSON.parse(dataStr);
+        if (json.error) {
+          return { text: `\n\n[Ollama Error: ${json.error}]`, finishReason: 'stop', done: true };
+        }
         if (json.message?.content !== undefined) {
           return {
             text: json.message.content ?? '',
@@ -434,11 +443,15 @@ export function parseProviderStreamLine(provider, line) {
       if (dataStr === '[DONE]') return { done: true };
       try {
         const json = JSON.parse(dataStr);
+        if (json.error) {
+          return { text: `\n\n[Provider Error: ${json.error.message || json.error}]`, finishReason: 'stop', done: true };
+        }
         const choice = json.choices?.[0];
         if (choice) {
           return {
             text: choice.delta?.content ?? '',
             finishReason: choice.finish_reason ?? null,
+            done: Boolean(choice.finish_reason),
           };
         }
       } catch {

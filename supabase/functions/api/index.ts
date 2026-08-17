@@ -592,6 +592,8 @@ async function routedChatStream(user: Caller, body: ChatBody): Promise<Response>
       const startedAt = Date.now();
       let buffer = '';
 
+      let hasEmittedFinish = false;
+
       const stream = new ReadableStream({
         async start(controller) {
           controller.enqueue(
@@ -633,7 +635,8 @@ async function routedChatStream(user: Caller, body: ChatBody): Promise<Response>
                   );
                 }
 
-                if (delta.done || delta.finishReason) {
+                if ((delta.done || delta.finishReason) && !hasEmittedFinish) {
+                  hasEmittedFinish = true;
                   controller.enqueue(
                     encoder.encode(
                       `data: ${JSON.stringify({
@@ -666,17 +669,21 @@ async function routedChatStream(user: Caller, body: ChatBody): Promise<Response>
               }
             }
 
-            controller.enqueue(
-              encoder.encode(
-                `data: ${JSON.stringify({
-                  id,
-                  object: 'chat.completion.chunk',
-                  created,
-                  model,
-                  choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
-                })}\n\n`,
-              ),
-            );
+            if (!hasEmittedFinish) {
+              hasEmittedFinish = true;
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({
+                    id,
+                    object: 'chat.completion.chunk',
+                    created,
+                    model,
+                    choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+                  })}\n\n`,
+                ),
+              );
+            }
+
             controller.enqueue(encoder.encode('data: [DONE]\n\n'));
             controller.close();
 
@@ -687,7 +694,33 @@ async function routedChatStream(user: Caller, body: ChatBody): Promise<Response>
               `stream-log-${provider.id}`,
             );
           } catch (streamErr: any) {
-            controller.error(streamErr);
+            if (!hasEmittedFinish) {
+              hasEmittedFinish = true;
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({
+                    id,
+                    object: 'chat.completion.chunk',
+                    created,
+                    model,
+                    choices: [{ index: 0, delta: { content: `\n\n[Streaming Error: ${streamErr.message}]` }, finish_reason: null }],
+                  })}\n\n`,
+                ),
+              );
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({
+                    id,
+                    object: 'chat.completion.chunk',
+                    created,
+                    model,
+                    choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+                  })}\n\n`,
+                ),
+              );
+              controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+            }
+            controller.close();
           }
         },
         cancel() {
@@ -1340,6 +1373,50 @@ app.get('/v1/models', handleModels);
 app.get('/models', handleModels);
 app.get('/v1/v1/models', handleModels);
 
+function createErrorSseResponse(errorMessage: string, model = 'oniroute'): Response {
+  const id = `chatcmpl_${crypto.randomUUID()}`;
+  const created = Math.floor(Date.now() / 1000);
+  const encoder = new TextEncoder();
+
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(
+        encoder.encode(
+          `data: ${JSON.stringify({
+            id,
+            object: 'chat.completion.chunk',
+            created,
+            model,
+            choices: [{ index: 0, delta: { role: 'assistant', content: `⚠️ ${errorMessage}` }, finish_reason: null }],
+          })}\n\n`,
+        ),
+      );
+      controller.enqueue(
+        encoder.encode(
+          `data: ${JSON.stringify({
+            id,
+            object: 'chat.completion.chunk',
+            created,
+            model,
+            choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+          })}\n\n`,
+        ),
+      );
+      controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+      controller.close();
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      'Connection': 'keep-alive',
+      'access-control-allow-origin': '*',
+    },
+  });
+}
+
 const handleChatCompletions = async (c: Context<Env>) => {
   const body = await c.req.json().catch(() => ({}));
   const user = c.get('user');
@@ -1360,6 +1437,9 @@ const handleChatCompletions = async (c: Context<Env>) => {
       oniroute: { provider: result.provider_used, mode: result.mode, latency_ms: result.latency_ms },
     });
   } catch (error) {
+    if (body.stream) {
+      return createErrorSseResponse(messageOf(error), body.model || 'oniroute');
+    }
     const status = error instanceof RequestError ? error.status : 502;
     return c.json({ error: { message: messageOf(error), type: 'routing_error' } }, status as 400);
   }

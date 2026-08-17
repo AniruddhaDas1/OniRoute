@@ -237,6 +237,31 @@ async function runTests() {
   }
   console.log('');
 
+  // 10. Streaming SSE Client / Hermes Agent Compatibility Test
+  console.log('10. Testing Hermes Agent & Streaming Client SSE Compatibility:');
+  const streamRes = await app.fetch(
+    new Request('http://localhost:1001/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${createdApiKey}`,
+      },
+      body: JSON.stringify({
+        model: 'oniroute',
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: true,
+      }),
+    }),
+  );
+
+  assert(streamRes.headers.get('Content-Type')?.includes('text/event-stream'), 'Streaming request returns Content-Type: text/event-stream');
+  const streamText = await streamRes.text();
+  assert(streamText.includes('data:'), 'Stream contains valid SSE data: events');
+  assert(streamText.includes('chat.completion.chunk'), 'Stream chunks contain object: chat.completion.chunk');
+  assert(streamText.includes('"finish_reason":"stop"'), 'Stream contains proper finish_reason: "stop"');
+  assert(streamText.includes('data: [DONE]'), 'Stream properly terminates with data: [DONE]');
+  console.log('');
+
   console.log('====================================================');
   console.log(`  Tests Complete: ${passed} Passed, ${failed} Failed`);
   console.log('====================================================');

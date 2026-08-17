@@ -330,8 +330,8 @@ async function routedChatStream(body, userId = LOCAL_USER_ID, keyRecord = null) 
       const created = Math.floor(Date.now() / 1000);
       const model = provider.model_name || 'oniroute';
       const startedAt = Date.now();
-
       let buffer = '';
+      let hasEmittedFinish = false;
 
       const stream = new ReadableStream({
         async start(controller) {
@@ -375,7 +375,8 @@ async function routedChatStream(body, userId = LOCAL_USER_ID, keyRecord = null) 
                   );
                 }
 
-                if (delta.done || delta.finishReason) {
+                if ((delta.done || delta.finishReason) && !hasEmittedFinish) {
+                  hasEmittedFinish = true;
                   controller.enqueue(
                     encoder.encode(
                       `data: ${JSON.stringify({
@@ -408,17 +409,21 @@ async function routedChatStream(body, userId = LOCAL_USER_ID, keyRecord = null) 
               }
             }
 
-            controller.enqueue(
-              encoder.encode(
-                `data: ${JSON.stringify({
-                  id,
-                  object: 'chat.completion.chunk',
-                  created,
-                  model,
-                  choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
-                })}\n\n`,
-              ),
-            );
+            if (!hasEmittedFinish) {
+              hasEmittedFinish = true;
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({
+                    id,
+                    object: 'chat.completion.chunk',
+                    created,
+                    model,
+                    choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+                  })}\n\n`,
+                ),
+              );
+            }
+
             controller.enqueue(encoder.encode('data: [DONE]\n\n'));
             controller.close();
 
@@ -430,7 +435,33 @@ async function routedChatStream(body, userId = LOCAL_USER_ID, keyRecord = null) 
               mode,
             });
           } catch (streamErr) {
-            controller.error(streamErr);
+            if (!hasEmittedFinish) {
+              hasEmittedFinish = true;
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({
+                    id,
+                    object: 'chat.completion.chunk',
+                    created,
+                    model,
+                    choices: [{ index: 0, delta: { content: `\n\n[Streaming Error: ${streamErr.message}]` }, finish_reason: null }],
+                  })}\n\n`,
+                ),
+              );
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({
+                    id,
+                    object: 'chat.completion.chunk',
+                    created,
+                    model,
+                    choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+                  })}\n\n`,
+                ),
+              );
+              controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+            }
+            controller.close();
           }
         },
         cancel() {
@@ -722,6 +753,50 @@ app.post('/chat', async (c) => {
   }
 });
 
+function createErrorSseResponseStandalone(errorMessage, model = 'oniroute') {
+  const id = `chatcmpl_${randomUUID()}`;
+  const created = Math.floor(Date.now() / 1000);
+  const encoder = new TextEncoder();
+
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(
+        encoder.encode(
+          `data: ${JSON.stringify({
+            id,
+            object: 'chat.completion.chunk',
+            created,
+            model,
+            choices: [{ index: 0, delta: { role: 'assistant', content: `⚠️ ${errorMessage}` }, finish_reason: null }],
+          })}\n\n`,
+        ),
+      );
+      controller.enqueue(
+        encoder.encode(
+          `data: ${JSON.stringify({
+            id,
+            object: 'chat.completion.chunk',
+            created,
+            model,
+            choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+          })}\n\n`,
+        ),
+      );
+      controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+      controller.close();
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      'Connection': 'keep-alive',
+      'access-control-allow-origin': '*',
+    },
+  });
+}
+
 const handleChatCompletionsStandalone = async (c) => {
   const keyRecord = authenticateGatewayKey(c);
   if (!keyRecord) {
@@ -731,8 +806,9 @@ const handleChatCompletionsStandalone = async (c) => {
     );
   }
 
+  let body = {};
   try {
-    const body = await c.req.json();
+    body = await c.req.json();
     if (body.stream) {
       return await routedChatStream(body, LOCAL_USER_ID, keyRecord);
     }
@@ -750,6 +826,9 @@ const handleChatCompletionsStandalone = async (c) => {
       oniroute: { provider: result.provider_used, mode: result.mode, latency_ms: result.latency_ms },
     });
   } catch (error) {
+    if (body.stream) {
+      return createErrorSseResponseStandalone(error.message, body.model || 'oniroute');
+    }
     return c.json({ error: { message: error.message, type: 'routing_error' } }, 502);
   }
 };
