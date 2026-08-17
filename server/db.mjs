@@ -22,6 +22,7 @@ function loadState() {
   }
   return {
     providers: [],
+    provider_groups: [],
     vault_secrets: {},
     routing_config: {
       mode: 'priority',
@@ -129,10 +130,68 @@ export const db = {
     return { user_id: userId, ...state.routing_config };
   },
 
+  // --- Provider Groups ---
+  getProviderGroups(userId = LOCAL_USER_ID) {
+    if (!Array.isArray(state.provider_groups)) state.provider_groups = [];
+    return state.provider_groups
+      .filter((g) => g.user_id === userId)
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+  },
+
+  getProviderGroupById(id, userId = LOCAL_USER_ID) {
+    if (!Array.isArray(state.provider_groups)) state.provider_groups = [];
+    return state.provider_groups.find((g) => g.id === id && g.user_id === userId) ?? null;
+  },
+
+  createProviderGroup(data, userId = LOCAL_USER_ID) {
+    if (!Array.isArray(state.provider_groups)) state.provider_groups = [];
+    const group = {
+      id: randomUUID(),
+      user_id: userId,
+      name: data.name?.trim() || 'Custom Group',
+      description: data.description?.trim() || null,
+      routing_mode: data.routing_mode === 'random' ? 'random' : 'priority',
+      provider_ids: Array.isArray(data.provider_ids) ? data.provider_ids : [],
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    state.provider_groups.push(group);
+    persist();
+    return group;
+  },
+
+  updateProviderGroup(id, updates, userId = LOCAL_USER_ID) {
+    if (!Array.isArray(state.provider_groups)) state.provider_groups = [];
+    const group = state.provider_groups.find((g) => g.id === id && g.user_id === userId);
+    if (!group) return null;
+    if (updates.name) group.name = updates.name.trim();
+    if (updates.description !== undefined) group.description = updates.description?.trim() || null;
+    if (updates.routing_mode) group.routing_mode = updates.routing_mode;
+    if (Array.isArray(updates.provider_ids)) group.provider_ids = updates.provider_ids;
+    group.updated_at = new Date().toISOString();
+    persist();
+    return group;
+  },
+
+  deleteProviderGroup(id, userId = LOCAL_USER_ID) {
+    if (!Array.isArray(state.provider_groups)) state.provider_groups = [];
+    const index = state.provider_groups.findIndex((g) => g.id === id && g.user_id === userId);
+    if (index === -1) return false;
+    state.provider_groups.splice(index, 1);
+    persist();
+    return true;
+  },
+
   // --- Gateway Keys ---
   getGatewayKeys(userId = LOCAL_USER_ID) {
+    if (!Array.isArray(state.provider_groups)) state.provider_groups = [];
+    const groupsMap = new Map(state.provider_groups.map((g) => [g.id, g.name]));
     return state.gateway_keys
       .filter((k) => k.user_id === userId)
+      .map((k) => ({
+        ...k,
+        provider_group_name: k.provider_group_id ? groupsMap.get(k.provider_group_id) || null : null,
+      }))
       .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
   },
 
@@ -140,13 +199,17 @@ export const db = {
     return state.gateway_keys.find((k) => k.key_hash === keyHash && !k.revoked_at) ?? null;
   },
 
-  createGatewayKey(name, keyPrefix, keyHash, userId = LOCAL_USER_ID, maxContextTokens = null) {
+  createGatewayKey(name, keyPrefix, keyHash, userId = LOCAL_USER_ID, maxContextTokens = null, options = {}) {
     const key = {
       id: randomUUID(),
       user_id: userId,
       name: name || 'Default key',
       key_prefix: keyPrefix,
       key_hash: keyHash,
+      provider_group_id: options.provider_group_id || null,
+      routing_mode: options.routing_mode || null,
+      gateway_mode: options.gateway_mode || 'flexible',
+      selected_provider_ids: Array.isArray(options.selected_provider_ids) ? options.selected_provider_ids : null,
       max_context_tokens: maxContextTokens ? Number(maxContextTokens) : null,
       last_used_at: null,
       revoked_at: null,

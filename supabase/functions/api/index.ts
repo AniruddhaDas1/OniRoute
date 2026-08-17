@@ -14,6 +14,10 @@ import { isProviderType, type ApiProvider, type LogStatus, type TokenUsage } fro
 type Caller = AuthUser & {
   gatewayKeyId?: string;
   maxContextTokens?: number | null;
+  providerGroupId?: string | null;
+  routingMode?: 'priority' | 'random' | null;
+  gatewayMode?: 'direct' | 'refined' | 'flexible' | null;
+  selectedProviderIds?: string[] | null;
   role?: string;
   isActive?: boolean;
   accessGranted?: boolean;
@@ -99,7 +103,7 @@ async function authenticate(request: Request): Promise<Caller | null> {
   const keyHash = await sha256(key);
   const { data } = await service
     .from('gateway_api_keys')
-    .select('id, user_id, max_context_tokens')
+    .select('id, user_id, max_context_tokens, provider_group_id, routing_mode, gateway_mode, selected_provider_ids')
     .eq('key_hash', keyHash)
     .is('revoked_at', null)
     .maybeSingle();
@@ -125,6 +129,10 @@ async function authenticate(request: Request): Promise<Caller | null> {
     email: profile?.email ?? '',
     gatewayKeyId: data.id,
     maxContextTokens: data.max_context_tokens,
+    providerGroupId: data.provider_group_id,
+    routingMode: data.routing_mode,
+    gatewayMode: data.gateway_mode,
+    selectedProviderIds: data.selected_provider_ids,
     role: isSuperAdmin ? 'super_admin' : (profile?.role ?? 'member'),
     isActive: profile ? profile.is_active : true,
     accessGranted: profile ? profile.access_granted : true,
@@ -311,22 +319,65 @@ async function routedChat(user: Caller, body: ChatBody) {
     throw new RequestError('Streaming is not supported yet. Retry with "stream": false.', 400);
   }
 
-  const mode = body.mode === 'refined' ? 'refined' : 'direct';
+  const mode = (user.gatewayMode && user.gatewayMode !== 'flexible')
+    ? (user.gatewayMode as 'direct' | 'refined')
+    : (body.mode === 'refined' ? 'refined' : 'direct');
   const { systemBlocks, turns } = readConversation(body);
   const options = readOptions(body);
   const client = getServiceClient();
 
   const { data: configRow } = await client.from('routing_configs').select('*').eq('user_id', user.id).maybeSingle();
-  // A missing row must fall back to the column defaults, not to `false`.
   const config = resolveRouting(configRow);
 
+  // Check if caller's key specifies a Provider Group or Selected Providers
+  let candidateProviderIds: string[] | null = null;
+  let keyOrGroupRoutingMode: 'priority' | 'random' | null = user.routingMode ?? null;
+
+  if (user.providerGroupId) {
+    const { data: group } = await client
+      .from('provider_groups')
+      .select('id, name, routing_mode, provider_ids')
+      .eq('id', user.providerGroupId)
+      .eq('user_id', user.id)
+      .maybeSingle();
+
+    if (group) {
+      candidateProviderIds = group.provider_ids || [];
+      if (!keyOrGroupRoutingMode) {
+        keyOrGroupRoutingMode = group.routing_mode;
+      }
+    }
+  } else if (Array.isArray(user.selectedProviderIds) && user.selectedProviderIds.length) {
+    candidateProviderIds = user.selectedProviderIds;
+  }
+
   const { data: allProviders } = await client
-    .from('ai_providers').select('*').eq('user_id', user.id).eq('is_active', true).order('priority');
+    .from('ai_providers')
+    .select('*')
+    .eq('user_id', user.id)
+    .eq('is_active', true)
+    .order('priority');
+
   let providers = (allProviders ?? []) as ApiProvider[];
-  if (config.mode === 'random') providers = shuffle(providers);
+
+  if (candidateProviderIds && candidateProviderIds.length) {
+    const idToProvider = new Map(providers.map((p) => [p.id, p]));
+    providers = candidateProviderIds
+      .map((id) => idToProvider.get(id))
+      .filter((p): p is ApiProvider => Boolean(p && p.is_active));
+  }
+
+  const effectiveRoutingMode = keyOrGroupRoutingMode || config.mode || 'priority';
+  if (effectiveRoutingMode === 'random') providers = shuffle(providers);
   providers = providers.filter((provider) => !isCircuitOpen(provider.id));
+
   if (!providers.length) {
-    throw new RequestError('No active provider is available. Add a provider or wait for the circuit breaker to recover.', 503);
+    throw new RequestError(
+      user.providerGroupId
+        ? 'No active providers available in the assigned Provider Group.'
+        : 'No active provider is available. Add a provider or wait for the circuit breaker to recover.',
+      503,
+    );
   }
 
   // Refine the user's last message if a refine_prompt is set.
@@ -695,15 +746,85 @@ app.get('/logs', sessionOnly, async (c) => {
 });
 
 // =============================================================================
+// Provider Groups (AI Provider Groups & Routing Profiles)
+// =============================================================================
+
+app.get('/provider-groups', sessionOnly, async (c) => {
+  const user = c.get('user');
+  const { data, error } = await getServiceClient()
+    .from('provider_groups')
+    .select('*')
+    .eq('user_id', user.id)
+    .order('created_at', { ascending: false });
+  return error ? c.json(err(error.message), 500) : c.json(ok(data ?? []));
+});
+
+app.post('/provider-groups', sessionOnly, async (c) => {
+  const user = c.get('user');
+  const body = await c.req.json();
+  const { data, error } = await getServiceClient()
+    .from('provider_groups')
+    .insert({
+      user_id: user.id,
+      name: body.name?.trim() || 'Custom Group',
+      description: body.description?.trim() || null,
+      routing_mode: body.routing_mode === 'random' ? 'random' : 'priority',
+      provider_ids: Array.isArray(body.provider_ids) ? body.provider_ids : [],
+    })
+    .select()
+    .single();
+  return error ? c.json(err(error.message), 500) : c.json(ok(data), 201);
+});
+
+app.put('/provider-groups/:id', sessionOnly, async (c) => {
+  const user = c.get('user');
+  const id = c.req.param('id');
+  const body = await c.req.json();
+  const updates: Record<string, any> = { updated_at: new Date().toISOString() };
+  if (body.name) updates.name = body.name.trim();
+  if (body.description !== undefined) updates.description = body.description?.trim() || null;
+  if (body.routing_mode) updates.routing_mode = body.routing_mode;
+  if (Array.isArray(body.provider_ids)) updates.provider_ids = body.provider_ids;
+
+  const { data, error } = await getServiceClient()
+    .from('provider_groups')
+    .update(updates)
+    .eq('id', id)
+    .eq('user_id', user.id)
+    .select()
+    .single();
+  return error ? c.json(err(error.message), 500) : c.json(ok(data));
+});
+
+app.delete('/provider-groups/:id', sessionOnly, async (c) => {
+  const user = c.get('user');
+  const id = c.req.param('id');
+  const { error } = await getServiceClient()
+    .from('provider_groups')
+    .delete()
+    .eq('id', id)
+    .eq('user_id', user.id);
+  return error ? c.json(err(error.message), 500) : c.json(ok({ deleted: true }));
+});
+
+// =============================================================================
 // Gateway keys
 // =============================================================================
 
 app.get('/gateway-keys', sessionOnly, async (c) => {
   const user = c.get('user');
   const { data, error } = await getServiceClient()
-    .from('gateway_api_keys').select('id, name, key_prefix, max_context_tokens, created_at, last_used_at, revoked_at')
-    .eq('user_id', user.id).order('created_at', { ascending: false });
-  return error ? c.json(err(error.message), 500) : c.json(ok(data));
+    .from('gateway_api_keys')
+    .select('id, name, key_prefix, provider_group_id, routing_mode, gateway_mode, selected_provider_ids, max_context_tokens, created_at, last_used_at, revoked_at, provider_groups(name)')
+    .eq('user_id', user.id)
+    .order('created_at', { ascending: false });
+
+  if (error) return c.json(err(error.message), 500);
+  const formatted = (data ?? []).map((k: any) => ({
+    ...k,
+    provider_group_name: k.provider_groups?.name || null,
+  }));
+  return c.json(ok(formatted));
 });
 
 app.post('/gateway-keys', sessionOnly, async (c) => {
@@ -715,8 +836,12 @@ app.post('/gateway-keys', sessionOnly, async (c) => {
     name: body.name?.trim() || 'Default key',
     key_prefix: `${key.slice(0, 11)}…`,
     key_hash: await sha256(key),
+    provider_group_id: body.provider_group_id || null,
+    routing_mode: body.routing_mode || null,
+    gateway_mode: body.gateway_mode || 'flexible',
+    selected_provider_ids: Array.isArray(body.selected_provider_ids) ? body.selected_provider_ids : null,
     max_context_tokens: body.max_context_tokens ? Number(body.max_context_tokens) : null,
-  }).select('id, name, key_prefix, max_context_tokens, created_at').single();
+  }).select('id, name, key_prefix, provider_group_id, routing_mode, gateway_mode, selected_provider_ids, max_context_tokens, created_at').single();
   return error ? c.json(err(error.message), 500) : c.json(ok({ ...data, key }), 201);
 });
 

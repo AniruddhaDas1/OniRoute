@@ -48,13 +48,29 @@ CREATE TABLE IF NOT EXISTS public.routing_configs (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 5. Table: gateway_api_keys (OniRoute Gateway Inference Keys)
+-- 5. Table: provider_groups (AI Provider Groups / Routing Profiles)
+CREATE TABLE IF NOT EXISTS public.provider_groups (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  description TEXT,
+  routing_mode TEXT NOT NULL DEFAULT 'priority' CHECK (routing_mode IN ('priority', 'random')),
+  provider_ids UUID[] NOT NULL DEFAULT '{}',
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 6. Table: gateway_api_keys (OniRoute Gateway Inference Keys)
 CREATE TABLE IF NOT EXISTS public.gateway_api_keys (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
   name TEXT NOT NULL DEFAULT 'Default key',
   key_prefix TEXT NOT NULL,
   key_hash TEXT NOT NULL UNIQUE,
+  provider_group_id UUID REFERENCES public.provider_groups(id) ON DELETE SET NULL,
+  routing_mode TEXT DEFAULT NULL CHECK (routing_mode IN ('priority', 'random')),
+  gateway_mode TEXT DEFAULT 'flexible' CHECK (gateway_mode IN ('direct', 'refined', 'flexible')),
+  selected_provider_ids UUID[] DEFAULT NULL,
   max_context_tokens INTEGER DEFAULT NULL,
   last_used_at TIMESTAMPTZ,
   revoked_at TIMESTAMPTZ,
@@ -171,6 +187,7 @@ ON CONFLICT (user_id) DO NOTHING;
 ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.ai_providers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.routing_configs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.provider_groups ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.gateway_api_keys ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.knowledge_bases ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.vector_chunks ENABLE ROW LEVEL SECURITY;
@@ -188,6 +205,11 @@ CREATE POLICY "profiles_update_own" ON public.profiles FOR UPDATE TO authenticat
 -- AI Providers Policies
 DROP POLICY IF EXISTS "ai_providers_all_own" ON public.ai_providers;
 CREATE POLICY "ai_providers_all_own" ON public.ai_providers FOR ALL TO authenticated
+  USING ((select auth.uid()) = user_id) WITH CHECK ((select auth.uid()) = user_id);
+
+-- Provider Groups Policies
+DROP POLICY IF EXISTS "provider_groups_all_own" ON public.provider_groups;
+CREATE POLICY "provider_groups_all_own" ON public.provider_groups FOR ALL TO authenticated
   USING ((select auth.uid()) = user_id) WITH CHECK ((select auth.uid()) = user_id);
 
 -- Routing Configs Policies

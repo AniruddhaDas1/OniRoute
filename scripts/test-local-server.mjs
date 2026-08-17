@@ -92,6 +92,38 @@ async function runTests() {
   const pruned = pruneContextToBudget(sys, turns, 20); // very small budget
   assert(pruned.length >= 2, 'pruneContextToBudget keeps system instruction and latest user turn');
   assert(pruned[pruned.length - 1].content === 'Turn 3: Most recent user command.', 'Latest query is strictly protected during context trimming');
+  // 5. Testing Provider Groups & Key-Level Routing Assignment
+  console.log('5. Testing Provider Groups & Key-Level Routing Assignment:');
+  const makeGroupRes = await app.request('/provider-groups', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: 'Coding LLMs Group',
+      description: 'Fast coding models cluster',
+      routing_mode: 'priority',
+      provider_ids: ['p1', 'p2'],
+    }),
+  });
+  assert(makeGroupRes.status === 201, 'POST /provider-groups creates group (HTTP 201)');
+  const groupData = await makeGroupRes.json();
+  assert(groupData.data?.name === 'Coding LLMs Group', 'Group name matches payload');
+  assert(groupData.data?.routing_mode === 'priority', 'Group routing_mode defaults to priority');
+
+  const makeKeyWithGroupRes = await app.request('/gateway-keys', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: 'Cursor Coding Key',
+      provider_group_id: groupData.data?.id,
+      routing_mode: 'priority',
+      gateway_mode: 'direct',
+      max_context_tokens: 256000,
+    }),
+  });
+  assert(makeKeyWithGroupRes.status === 201, 'POST /gateway-keys creates key linked to group (HTTP 201)');
+  const keyWithGroupData = await makeKeyWithGroupRes.json();
+  assert(keyWithGroupData.data?.provider_group_id === groupData.data?.id, 'Gateway key links to provider_group_id');
+  assert(keyWithGroupData.data?.gateway_mode === 'direct', 'Gateway key configures direct mode (0ms RAG overhead)');
   console.log('');
 
   console.log('========================================');

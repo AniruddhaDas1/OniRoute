@@ -72,12 +72,27 @@ export interface TokenUsage {
   total_tokens: number;
 }
 
+export interface ProviderGroup {
+  id: string;
+  user_id: string;
+  name: string;
+  description: string | null;
+  routing_mode: 'priority' | 'random';
+  provider_ids: string[];
+  created_at: string;
+  updated_at: string;
+}
+
 export interface GatewayKey {
   id: string;
   user_id: string;
   name: string;
   key_prefix: string;
   key_hash: string;
+  provider_group_id?: string | null;
+  routing_mode?: 'priority' | 'random' | null;
+  gateway_mode?: 'direct' | 'refined' | 'flexible' | null;
+  selected_provider_ids?: string[] | null;
   max_context_tokens?: number | null;
   created_at: string;
   last_used_at: string | null;

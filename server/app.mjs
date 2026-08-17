@@ -94,17 +94,49 @@ async function refineUserMessage(providers, userMessage, refinePrompt, timeoutMs
   return userMessage;
 }
 
-async function routedChat(body, userId = LOCAL_USER_ID, maxContextTokens = null) {
-  const mode = body.mode === 'refined' ? 'refined' : 'direct';
-  const config = db.getRoutingConfig(userId);
-  let providers = db.getProviders(userId).filter((p) => p.is_active);
-
-  if (!providers.length) {
-    throw new Error('No active AI providers configured in OniRoute. Add one in the dashboard.');
+async function routedChat(body, userId = LOCAL_USER_ID, keyRecord = null) {
+  let mode = body.mode === 'refined' ? 'refined' : 'direct';
+  if (keyRecord?.gateway_mode && keyRecord.gateway_mode !== 'flexible') {
+    mode = keyRecord.gateway_mode;
   }
 
-  if (config.mode === 'random') {
+  const config = db.getRoutingConfig(userId);
+  let allProviders = db.getProviders(userId).filter((p) => p.is_active);
+
+  let candidateProviderIds = null;
+  let keyOrGroupRoutingMode = keyRecord?.routing_mode || null;
+
+  if (keyRecord?.provider_group_id) {
+    const group = db.getProviderGroupById(keyRecord.provider_group_id, userId);
+    if (group) {
+      candidateProviderIds = group.provider_ids || [];
+      if (!keyOrGroupRoutingMode) {
+        keyOrGroupRoutingMode = group.routing_mode;
+      }
+    }
+  } else if (Array.isArray(keyRecord?.selected_provider_ids) && keyRecord.selected_provider_ids.length) {
+    candidateProviderIds = keyRecord.selected_provider_ids;
+  }
+
+  let providers = allProviders;
+  if (candidateProviderIds && candidateProviderIds.length) {
+    const idToProvider = new Map(allProviders.map((p) => [p.id, p]));
+    providers = candidateProviderIds
+      .map((id) => idToProvider.get(id))
+      .filter((p) => Boolean(p && p.is_active));
+  }
+
+  const effectiveRoutingMode = keyOrGroupRoutingMode || config.mode || 'priority';
+  if (effectiveRoutingMode === 'random') {
     providers = shuffle(providers);
+  }
+
+  if (!providers.length) {
+    throw new Error(
+      keyRecord?.provider_group_id
+        ? 'No active AI providers available in the assigned Provider Group.'
+        : 'No active AI providers configured in OniRoute. Add one in the dashboard.'
+    );
   }
 
   const turns = [];
@@ -156,7 +188,7 @@ async function routedChat(body, userId = LOCAL_USER_ID, maxContextTokens = null)
   }
 
   // Enforce isolated context window budget if configured for this key/request
-  const effectiveMaxTokens = body.max_context_tokens || maxContextTokens;
+  const effectiveMaxTokens = body.max_context_tokens || keyRecord?.max_context_tokens;
   const messages = pruneContextToBudget(systemBlocks, turns, effectiveMaxTokens);
   const maxAttempts = Math.min(providers.length, (config.max_retries ?? 3) + 1);
   const failures = [];
@@ -317,6 +349,25 @@ app.post('/knowledge/:id/ingest', async (c) => {
   return c.json(ok({ queued: true }), 202);
 });
 
+// Provider Groups
+app.get('/provider-groups', (c) => c.json(ok(db.getProviderGroups())));
+app.post('/provider-groups', async (c) => {
+  const body = await c.req.json();
+  const group = db.createProviderGroup(body);
+  return c.json(ok(group), 201);
+});
+app.put('/provider-groups/:id', async (c) => {
+  const id = c.req.param('id');
+  const body = await c.req.json();
+  const updated = db.updateProviderGroup(id, body);
+  if (!updated) return c.json(err('Provider group not found'), 404);
+  return c.json(ok(updated));
+});
+app.delete('/provider-groups/:id', (c) => {
+  const deleted = db.deleteProviderGroup(c.req.param('id'));
+  return c.json(ok({ deleted }));
+});
+
 // Logs
 app.get('/logs', (c) => {
   const limit = Number(c.req.query('limit') || 50);
@@ -330,7 +381,19 @@ app.post('/gateway-keys', async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const key = createGatewayKey();
   const keyHash = sha256(key);
-  const record = db.createGatewayKey(body.name, `${key.slice(0, 11)}…`, keyHash, LOCAL_USER_ID, body.max_context_tokens);
+  const record = db.createGatewayKey(
+    body.name,
+    `${key.slice(0, 11)}…`,
+    keyHash,
+    LOCAL_USER_ID,
+    body.max_context_tokens,
+    {
+      provider_group_id: body.provider_group_id,
+      routing_mode: body.routing_mode,
+      gateway_mode: body.gateway_mode,
+      selected_provider_ids: body.selected_provider_ids,
+    }
+  );
   return c.json(ok({ ...record, key }), 201);
 });
 app.delete('/gateway-keys/:id', (c) => {
@@ -367,7 +430,7 @@ app.post('/chat', async (c) => {
       db.touchGatewayKey(keyRecord.id);
     }
     const body = await c.req.json();
-    const result = await routedChat(body, LOCAL_USER_ID, keyRecord?.max_context_tokens);
+    const result = await routedChat(body, LOCAL_USER_ID, keyRecord);
     return c.json(ok(result));
   } catch (error) {
     return c.json(err(error.message), 400);
@@ -387,7 +450,7 @@ app.post('/v1/chat/completions', async (c) => {
     }
 
     const body = await c.req.json();
-    const result = await routedChat(body, LOCAL_USER_ID, keyRecord?.max_context_tokens);
+    const result = await routedChat(body, LOCAL_USER_ID, keyRecord);
 
     return c.json({
       id: `chatcmpl_${randomUUID()}`,

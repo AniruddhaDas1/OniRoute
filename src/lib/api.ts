@@ -138,8 +138,50 @@ function mockResponse<T>(path: string, options: RequestInit = {}): T | null {
     return { success: true, latency_ms: 128 } as T;
   }
 
+  if (path === '/provider-groups') {
+    const list = getDemoStore('provider_groups', []);
+    if (method === 'POST') {
+      const newGroup = {
+        id: `demo-grp-${Date.now()}`,
+        user_id: 'demo-user',
+        name: body.name || 'Custom Group',
+        description: body.description || null,
+        routing_mode: body.routing_mode === 'random' ? 'random' : 'priority',
+        provider_ids: Array.isArray(body.provider_ids) ? body.provider_ids : [],
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      list.push(newGroup);
+      setDemoStore('provider_groups', list);
+      return newGroup as T;
+    }
+    return list as T;
+  }
+
+  if (path.startsWith('/provider-groups/')) {
+    const id = path.replace('/provider-groups/', '');
+    let list = getDemoStore('provider_groups', []);
+    if (method === 'PUT') {
+      const idx = list.findIndex((g: any) => g.id === id);
+      if (idx !== -1) {
+        list[idx] = { ...list[idx], ...body, updated_at: new Date().toISOString() };
+        setDemoStore('provider_groups', list);
+        return list[idx] as T;
+      }
+      return null;
+    }
+    if (method === 'DELETE') {
+      list = list.filter((g: any) => g.id !== id);
+      setDemoStore('provider_groups', list);
+      return { deleted: true } as T;
+    }
+  }
+
   if (path === '/gateway-keys') {
     const list = getDemoStore('keys', []);
+    const groups = getDemoStore('provider_groups', []);
+    const grpMap = new Map(groups.map((g: any) => [g.id, g.name]));
+
     if (method === 'POST') {
       const keyStr = `or_${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
       const newKey = {
@@ -147,6 +189,11 @@ function mockResponse<T>(path: string, options: RequestInit = {}): T | null {
         name: body.name || `Key ${list.length + 1}`,
         key_prefix: `${keyStr.slice(0, 11)}…`,
         key: keyStr,
+        provider_group_id: body.provider_group_id || null,
+        provider_group_name: body.provider_group_id ? grpMap.get(body.provider_group_id) || null : null,
+        routing_mode: body.routing_mode || null,
+        gateway_mode: body.gateway_mode || 'flexible',
+        selected_provider_ids: body.selected_provider_ids || null,
         max_context_tokens: body.max_context_tokens || null,
         created_at: new Date().toISOString(),
         last_used_at: null,
@@ -156,7 +203,10 @@ function mockResponse<T>(path: string, options: RequestInit = {}): T | null {
       setDemoStore('keys', list);
       return newKey as T;
     }
-    return list.filter((k: any) => !k.revoked_at) as T;
+    return list.filter((k: any) => !k.revoked_at).map((k: any) => ({
+      ...k,
+      provider_group_name: k.provider_group_id ? grpMap.get(k.provider_group_id) || null : null,
+    })) as T;
   }
 
   if (path.startsWith('/gateway-keys/')) {
@@ -377,6 +427,55 @@ async function supabaseDirect<T>(path: string, options: RequestInit = {}): Promi
     }) as T;
   }
 
+  if (path === '/provider-groups') {
+    if (method === 'POST') {
+      const { data, error } = await supabase
+        .from('provider_groups')
+        .insert({
+          user_id: userId,
+          name: body.name || 'Custom Group',
+          description: body.description || null,
+          routing_mode: body.routing_mode === 'random' ? 'random' : 'priority',
+          provider_ids: Array.isArray(body.provider_ids) ? body.provider_ids : [],
+        })
+        .select()
+        .single();
+      if (error) throw new Error(error.message);
+      return data as T;
+    }
+    const { data, error } = await supabase
+      .from('provider_groups')
+      .select('*')
+      .order('created_at', { ascending: false });
+    if (error) return [] as unknown as T;
+    return (data || []) as T;
+  }
+
+  if (path.startsWith('/provider-groups/')) {
+    const id = path.replace('/provider-groups/', '');
+    if (method === 'PUT') {
+      const updates: Record<string, any> = { updated_at: new Date().toISOString() };
+      if (body.name) updates.name = body.name.trim();
+      if (body.description !== undefined) updates.description = body.description || null;
+      if (body.routing_mode) updates.routing_mode = body.routing_mode;
+      if (Array.isArray(body.provider_ids)) updates.provider_ids = body.provider_ids;
+
+      const { data, error } = await supabase
+        .from('provider_groups')
+        .update(updates)
+        .eq('id', id)
+        .select()
+        .single();
+      if (error) throw new Error(error.message);
+      return data as T;
+    }
+    if (method === 'DELETE') {
+      const { error } = await supabase.from('provider_groups').delete().eq('id', id);
+      if (error) throw new Error(error.message);
+      return { deleted: true } as T;
+    }
+  }
+
   if (path === '/gateway-keys') {
     if (method === 'POST') {
       const keyStr = `or_${crypto.randomUUID().replace(/-/g, '')}${crypto.randomUUID().replace(/-/g, '')}`;
@@ -392,20 +491,28 @@ async function supabaseDirect<T>(path: string, options: RequestInit = {}): Promi
           name: body.name || 'Default Key',
           key_prefix: `${keyStr.slice(0, 11)}…`,
           key_hash: keyHash,
+          provider_group_id: body.provider_group_id || null,
+          routing_mode: body.routing_mode || null,
+          gateway_mode: body.gateway_mode || 'flexible',
+          selected_provider_ids: Array.isArray(body.selected_provider_ids) ? body.selected_provider_ids : null,
           max_context_tokens: body.max_context_tokens ? Number(body.max_context_tokens) : null,
         })
-        .select('id, name, key_prefix, max_context_tokens, created_at')
+        .select('id, name, key_prefix, provider_group_id, routing_mode, gateway_mode, selected_provider_ids, max_context_tokens, created_at')
         .single();
       if (error) throw new Error(error.message);
       return { ...data, key: keyStr } as T;
     }
     const { data, error } = await supabase
       .from('gateway_api_keys')
-      .select('id, name, key_prefix, max_context_tokens, created_at, last_used_at, revoked_at')
+      .select('id, name, key_prefix, provider_group_id, routing_mode, gateway_mode, selected_provider_ids, max_context_tokens, created_at, last_used_at, revoked_at, provider_groups(name)')
       .is('revoked_at', null)
       .order('created_at', { ascending: false });
     if (error) throw new Error(error.message);
-    return (data || []) as T;
+    const formatted = (data || []).map((k: any) => ({
+      ...k,
+      provider_group_name: k.provider_groups?.name || null,
+    }));
+    return formatted as T;
   }
 
   if (path.startsWith('/gateway-keys/')) {
