@@ -56,7 +56,7 @@ EOF
   echo "✅ Local .env generated"
   echo ""
   echo "📦 Applying local database migrations..."
-  supabase_cmd db reset || true
+  supabase_cmd db reset || { echo "❌ Local database migration reset failed. Check error above."; exit 1; }
   echo "✅ Local migrations applied"
   echo ""
 

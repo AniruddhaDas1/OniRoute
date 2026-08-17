@@ -1,6 +1,8 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { randomUUID } from 'node:crypto';
+import { ReadableStream } from 'node:stream/web';
+import { TextEncoder } from 'node:util';
 import { db, LOCAL_USER_ID } from './db.mjs';
 import { sha256, createGatewayKey } from './crypto.mjs';
 import {
@@ -9,6 +11,7 @@ import {
   parseProviderResponse,
   embedText,
   pruneContextToBudget,
+  validateProviderUrl,
 } from './provider-client.mjs';
 import { searchVectorChunks } from './vector.mjs';
 import { splitChunks } from './chunking.mjs';
@@ -244,32 +247,52 @@ async function routedChat(body, userId = LOCAL_USER_ID, keyRecord = null) {
 
 // Providers
 app.get('/providers', (c) => c.json(ok(db.getProviders())));
+
 app.post('/providers', async (c) => {
   const body = await c.req.json();
+  try {
+    validateProviderUrl(body);
+  } catch (e) {
+    return c.json(err(e.message), 400);
+  }
   const provider = db.createProvider(body, body.api_key);
   return c.json(ok(provider), 201);
 });
+
 app.put('/providers/reorder', async (c) => {
   const { provider_ids } = await c.req.json();
   db.reorderProviders(provider_ids);
   return c.json(ok({ reordered: provider_ids }));
 });
+
 app.put('/providers/:id', async (c) => {
   const id = c.req.param('id');
   const body = await c.req.json();
+  const existing = db.getProviderById(id);
+  if (!existing) return c.json(err('Not found'), 404);
+
+  try {
+    validateProviderUrl({ ...existing, ...body });
+  } catch (e) {
+    return c.json(err(e.message), 400);
+  }
+
   const provider = db.updateProvider(id, body, body.api_key);
   return provider ? c.json(ok(provider)) : c.json(err('Not found'), 404);
 });
+
 app.delete('/providers/:id', (c) => {
   const deleted = db.deleteProvider(c.req.param('id'));
   return c.json(ok({ deleted }));
 });
+
 app.get('/providers/:id/secret', (c) => {
   const provider = db.getProviderById(c.req.param('id'));
   if (!provider) return c.json(err('Not found'), 404);
   const secret = db.getProviderSecret(provider.id);
   return c.json(ok({ api_key: secret || '', exists: Boolean(secret) }));
 });
+
 app.post('/test-provider/:id', async (c) => {
   const provider = db.getProviderById(c.req.param('id'));
   if (!provider) return c.json(err('Not found'), 404);
@@ -357,18 +380,37 @@ app.post('/knowledge/:id/ingest', async (c) => {
 
 // Provider Groups
 app.get('/provider-groups', (c) => c.json(ok(db.getProviderGroups())));
+
 app.post('/provider-groups', async (c) => {
   const body = await c.req.json();
+  if (Array.isArray(body.provider_ids) && body.provider_ids.length > 0) {
+    const userProviders = db.getProviders(LOCAL_USER_ID);
+    const ownedIds = new Set(userProviders.map((p) => p.id));
+    const invalid = body.provider_ids.filter((pId) => !ownedIds.has(pId));
+    if (invalid.length > 0) {
+      return c.json(err(`Invalid provider IDs: ${invalid.join(', ')}`), 400);
+    }
+  }
   const group = db.createProviderGroup(body);
   return c.json(ok(group), 201);
 });
+
 app.put('/provider-groups/:id', async (c) => {
   const id = c.req.param('id');
   const body = await c.req.json();
+  if (Array.isArray(body.provider_ids) && body.provider_ids.length > 0) {
+    const userProviders = db.getProviders(LOCAL_USER_ID);
+    const ownedIds = new Set(userProviders.map((p) => p.id));
+    const invalid = body.provider_ids.filter((pId) => !ownedIds.has(pId));
+    if (invalid.length > 0) {
+      return c.json(err(`Invalid provider IDs: ${invalid.join(', ')}`), 400);
+    }
+  }
   const updated = db.updateProviderGroup(id, body);
   if (!updated) return c.json(err('Provider group not found'), 404);
   return c.json(ok(updated));
 });
+
 app.delete('/provider-groups/:id', (c) => {
   const deleted = db.deleteProviderGroup(c.req.param('id'));
   return c.json(ok({ deleted }));
@@ -407,7 +449,6 @@ app.delete('/gateway-keys/:id', (c) => {
   return c.json(ok({ revoked }));
 });
 
-// Inference Routes (OpenAI compatible)
 // --- Super Admin & Member Management ---
 app.get('/admin/members', (c) => {
   return c.json(ok(db.getMembers()));
@@ -425,15 +466,31 @@ app.patch('/admin/members/:id', async (c) => {
   }
 });
 
+// Auth helper for inference routes
+function authenticateGatewayKey(c) {
+  const authHeader = c.req.header('Authorization') || c.req.header('authorization') || '';
+  const keyHeader =
+    c.req.header('x-oniroute-key') ||
+    c.req.header('x-api-key') ||
+    c.req.header('api-key') ||
+    c.req.header('X-API-KEY');
+  const token = authHeader.replace(/^Bearer\s+/i, '').trim();
+  const rawKey = (keyHeader || token).trim();
+
+  if (!rawKey) return null;
+  const keyRecord = db.getGatewayKeyByHash(sha256(rawKey));
+  if (keyRecord && !keyRecord.revoked_at) {
+    db.touchGatewayKey(keyRecord.id);
+    return keyRecord;
+  }
+  return null;
+}
+
 app.post('/chat', async (c) => {
   try {
-    const authHeader = c.req.header('Authorization') || '';
-    const customKey = c.req.header('x-oniroute-key') || authHeader.replace(/^Bearer\s+/i, '');
-    let keyRecord = null;
-    if (customKey && customKey.startsWith('or_')) {
-      keyRecord = db.getGatewayKeyByHash(sha256(customKey));
-      if (!keyRecord) return c.json(err('Invalid or revoked OniRoute key.'), 401);
-      db.touchGatewayKey(keyRecord.id);
+    const keyRecord = authenticateGatewayKey(c);
+    if (!keyRecord) {
+      return c.json(err('Unauthorized. A valid OniRoute gateway API key is required.'), 401);
     }
     const body = await c.req.json();
     const result = await routedChat(body, LOCAL_USER_ID, keyRecord);
@@ -443,20 +500,80 @@ app.post('/chat', async (c) => {
   }
 });
 
-app.post('/v1/chat/completions', async (c) => {
+const handleChatCompletionsStandalone = async (c) => {
+  const keyRecord = authenticateGatewayKey(c);
+  if (!keyRecord) {
+    return c.json(
+      { error: { message: 'Unauthorized. A valid OniRoute gateway API key (or_...) is required.', type: 'authentication_error' } },
+      401,
+    );
+  }
+
   try {
-    const authHeader = c.req.header('Authorization') || '';
-    const customKey = c.req.header('x-oniroute-key') || authHeader.replace(/^Bearer\s+/i, '');
-    let keyRecord = null;
-
-    if (customKey && customKey.startsWith('or_')) {
-      keyRecord = db.getGatewayKeyByHash(sha256(customKey));
-      if (!keyRecord) return c.json({ error: { message: 'Invalid or revoked OniRoute key.' } }, 401);
-      db.touchGatewayKey(keyRecord.id);
-    }
-
     const body = await c.req.json();
     const result = await routedChat(body, LOCAL_USER_ID, keyRecord);
+
+    if (body.stream) {
+      const stream = new ReadableStream({
+        start(controller) {
+          const id = `chatcmpl_${randomUUID()}`;
+          const created = Math.floor(Date.now() / 1000);
+          const model = result.model || 'oniroute';
+          const content = result.response || '';
+
+          controller.enqueue(
+            new TextEncoder().encode(
+              `data: ${JSON.stringify({
+                id,
+                object: 'chat.completion.chunk',
+                created,
+                model,
+                choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }],
+              })}\n\n`
+            )
+          );
+
+          const words = content.split(' ');
+          for (let i = 0; i < words.length; i++) {
+            const chunk = (i === 0 ? '' : ' ') + words[i];
+            controller.enqueue(
+              new TextEncoder().encode(
+                `data: ${JSON.stringify({
+                  id,
+                  object: 'chat.completion.chunk',
+                  created,
+                  model,
+                  choices: [{ index: 0, delta: { content: chunk }, finish_reason: null }],
+                })}\n\n`
+              )
+            );
+          }
+
+          controller.enqueue(
+            new TextEncoder().encode(
+              `data: ${JSON.stringify({
+                id,
+                object: 'chat.completion.chunk',
+                created,
+                model,
+                choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+              })}\n\n`
+            )
+          );
+          controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+          controller.close();
+        },
+      });
+
+      return new Response(stream, {
+        headers: {
+          'Content-Type': 'text/event-stream; charset=utf-8',
+          'Cache-Control': 'no-cache, no-transform',
+          'Connection': 'keep-alive',
+          'access-control-allow-origin': '*',
+        },
+      });
+    }
 
     return c.json({
       id: `chatcmpl_${randomUUID()}`,
@@ -472,20 +589,32 @@ app.post('/v1/chat/completions', async (c) => {
   } catch (error) {
     return c.json({ error: { message: error.message, type: 'routing_error' } }, 502);
   }
-});
+};
+
+app.post('/v1/chat/completions', handleChatCompletionsStandalone);
+app.post('/chat/completions', handleChatCompletionsStandalone);
+app.post('/v1/v1/chat/completions', handleChatCompletionsStandalone);
 
 // Models endpoint (Standard OpenAI client discovery)
-app.get('/v1/models', (c) => {
+const handleModelsStandalone = (c) => {
   const providers = db.getProviders();
+  const list = providers.map((p) => ({
+    id: p.model_name || p.name.toLowerCase().replace(/\s+/g, '-'),
+    object: 'model',
+    created: 1700000000,
+    owned_by: 'oniroute',
+  }));
+  list.unshift({ id: 'oniroute', object: 'model', created: 1700000000, owned_by: 'oniroute' });
   return c.json({
     object: 'list',
-    data: providers.map((p) => ({
-      id: p.name.toLowerCase().replace(/\s+/g, '-'),
-      object: 'model',
-      created: 1700000000,
-      owned_by: 'oniroute',
-    })),
+    data: list,
   });
-});
+};
+
+app.get('/v1/models', handleModelsStandalone);
+app.get('/models', handleModelsStandalone);
+app.get('/v1/v1/models', handleModelsStandalone);
 
 app.get('/health', (c) => c.json({ status: 'ok', server: 'oniroute-local', port: 1001 }));
+app.get('/v1/health', (c) => c.json({ status: 'ok', server: 'oniroute-local', port: 1001 }));
+

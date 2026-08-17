@@ -6,20 +6,96 @@ export function joinUrl(baseUrl, endpoint) {
   return `${baseUrl.replace(/\/$/, '')}/${endpoint.replace(/^\//, '')}`;
 }
 
+export function validateProviderUrl(provider) {
+  const fullUrl = joinUrl(provider.base_url, provider.endpoint);
+  let parsed;
+  try {
+    parsed = new URL(fullUrl);
+  } catch {
+    throw new Error(`Invalid provider URL: ${fullUrl}`);
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`Unsupported URL protocol: ${parsed.protocol}`);
+  }
+
+  if (parsed.username || parsed.password) {
+    throw new Error('Provider URL cannot contain embedded credentials.');
+  }
+
+  const hostname = parsed.hostname.toLowerCase();
+
+  switch (provider.provider_type) {
+    case 'openai':
+      if (!hostname.endsWith('openai.com') && !hostname.endsWith('azure.com')) {
+        throw new Error(`Invalid OpenAI endpoint domain: "${hostname}". Expected api.openai.com or *.openai.azure.com.`);
+      }
+      break;
+
+    case 'anthropic':
+      if (!hostname.endsWith('anthropic.com')) {
+        throw new Error(`Invalid Anthropic endpoint domain: "${hostname}". Expected api.anthropic.com.`);
+      }
+      break;
+
+    case 'google':
+      if (!hostname.endsWith('googleapis.com')) {
+        throw new Error(`Invalid Google Gemini endpoint domain: "${hostname}". Expected generativelanguage.googleapis.com.`);
+      }
+      break;
+
+    case 'ollama': {
+      const isLoopback = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '0.0.0.0' || hostname.endsWith('.local');
+      const isCloud = hostname.endsWith('ollama.com') || hostname.endsWith('ollama.ai');
+      const isPrivateSubnet = /^10\.|^192\.168\.|^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(hostname);
+      if (!isLoopback && !isCloud && !isPrivateSubnet && parsed.protocol !== 'https:') {
+        throw new Error(`Invalid Ollama endpoint host: "${hostname}". Expected localhost, ollama.com, or private network.`);
+      }
+      break;
+    }
+
+    case 'custom':
+    default:
+      if (!hostname) {
+        throw new Error('Custom provider must specify a valid hostname.');
+      }
+      break;
+  }
+}
+
 export function normaliseMessages(raw) {
   const messages = [];
   for (const item of raw || []) {
-    const content = typeof item.content === 'string'
-      ? item.content
-      : Array.isArray(item.content)
-      ? item.content.map((part) => (typeof part === 'string' ? part : String(part?.text ?? ''))).join('')
-      : '';
-    if (!content.trim()) continue;
-    const role = String(item.role ?? 'user').toLowerCase();
-    messages.push({
-      role: role === 'system' || role === 'developer' ? 'system' : role === 'assistant' || role === 'model' ? 'assistant' : 'user',
-      content,
-    });
+    let content = '';
+    if (typeof item.content === 'string') {
+      content = item.content;
+    } else if (Array.isArray(item.content)) {
+      content = item.content
+        .map((part) => {
+          if (typeof part === 'string') return part;
+          if (part?.type === 'text') return String(part.text ?? '');
+          if (part?.type === 'image_url') return `[Image: ${part.image_url?.url || ''}]`;
+          return '';
+        })
+        .join('');
+    } else if (item.content !== undefined && item.content !== null) {
+      content = String(item.content);
+    }
+
+    const rawRole = String(item.role ?? 'user').toLowerCase();
+    let role = 'user';
+    if (rawRole === 'system' || rawRole === 'developer') role = 'system';
+    else if (rawRole === 'assistant' || rawRole === 'model') role = 'assistant';
+    else if (rawRole === 'tool' || rawRole === 'function') role = 'tool';
+
+    if (!content.trim() && !item.tool_calls && !item.tool_call_id) continue;
+
+    const msg = { role, content };
+    if (item.name) msg.name = String(item.name);
+    if (item.tool_call_id) msg.tool_call_id = String(item.tool_call_id);
+    if (item.tool_calls) msg.tool_calls = item.tool_calls;
+
+    messages.push(msg);
   }
   return messages;
 }
@@ -27,7 +103,7 @@ export function normaliseMessages(raw) {
 function mergeSameRole(messages) {
   return messages.reduce((merged, message) => {
     const previous = merged.at(-1);
-    if (previous && previous.role === message.role) {
+    if (previous && previous.role === message.role && previous.role !== 'tool' && !previous.tool_calls) {
       previous.content = `${previous.content}\n\n${message.content}`;
     } else {
       merged.push({ ...message });
@@ -37,7 +113,10 @@ function mergeSameRole(messages) {
 }
 
 function splitSystem(messages) {
-  const system = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
+  const system = messages
+    .filter((m) => m.role === 'system')
+    .map((m) => m.content)
+    .join('\n\n');
   const turns = mergeSameRole(messages.filter((m) => m.role !== 'system'));
   while (turns.length && turns[0].role === 'assistant') turns.shift();
   return { system, turns };
@@ -59,11 +138,11 @@ export function pruneContextToBudget(systemBlocks, turns, maxContextTokens) {
   const keptTurns = [];
   const lastTurn = turns[turns.length - 1];
   keptTurns.unshift(lastTurn);
-  currentChars += lastTurn.content.length;
+  currentChars += (lastTurn.content || '').length;
 
   for (let i = turns.length - 2; i >= 0; i--) {
     const turn = turns[i];
-    const turnLen = turn.content.length;
+    const turnLen = (turn.content || '').length;
     if (currentChars + turnLen > maxChars) {
       break;
     }
@@ -75,7 +154,9 @@ export function pruneContextToBudget(systemBlocks, turns, maxContextTokens) {
 }
 
 export function buildProviderRequest(provider, apiKey, messages, options = {}) {
+  validateProviderUrl(provider);
   const url = joinUrl(provider.base_url, provider.endpoint);
+  const stream = Boolean(options.stream);
 
   switch (provider.provider_type) {
     case 'anthropic': {
@@ -91,19 +172,29 @@ export function buildProviderRequest(provider, apiKey, messages, options = {}) {
           temperature: options.temperature,
           top_p: options.topP,
           stop_sequences: options.stop,
+          stream,
         })),
       };
     }
 
     case 'google': {
       const { system, turns } = splitSystem(messages);
+      let googleUrl = url;
+      if (stream && !googleUrl.includes('streamGenerateContent')) {
+        googleUrl = googleUrl.replace(':generateContent', ':streamGenerateContent');
+        if (!googleUrl.includes(':streamGenerateContent')) {
+          googleUrl = `${googleUrl}:streamGenerateContent?alt=sse`;
+        } else if (!googleUrl.includes('alt=sse')) {
+          googleUrl = `${googleUrl}&alt=sse`;
+        }
+      }
       return {
-        url,
+        url: googleUrl,
         headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
         body: JSON.stringify(defined({
-          contents: turns.map((m) => ({
-            role: m.role === 'assistant' ? 'model' : 'user',
-            parts: [{ text: m.content }],
+          contents: turns.map((message) => ({
+            role: message.role === 'assistant' ? 'model' : 'user',
+            parts: [{ text: message.content }],
           })),
           systemInstruction: system ? { parts: [{ text: system }] } : undefined,
           generationConfig: defined({
@@ -120,7 +211,6 @@ export function buildProviderRequest(provider, apiKey, messages, options = {}) {
       const headers = { 'Content-Type': 'application/json' };
       if (apiKey && apiKey !== 'ollama') headers.Authorization = `Bearer ${apiKey}`;
 
-      // If native Ollama endpoint (/chat or /api/chat)
       if (provider.endpoint === '/chat' || provider.endpoint === '/api/chat' || provider.base_url.endsWith('/api')) {
         return {
           url,
@@ -128,7 +218,7 @@ export function buildProviderRequest(provider, apiKey, messages, options = {}) {
           body: JSON.stringify(defined({
             model: provider.model_name,
             messages,
-            stream: false,
+            stream,
             options: defined({
               temperature: options.temperature,
               top_p: options.topP,
@@ -139,14 +229,13 @@ export function buildProviderRequest(provider, apiKey, messages, options = {}) {
         };
       }
 
-      // OpenAI-compatible Ollama endpoint (/v1/chat/completions)
       return {
         url,
         headers,
         body: JSON.stringify(defined({
           model: provider.model_name,
           messages,
-          stream: false,
+          stream,
           max_tokens: options.maxTokens,
           temperature: options.temperature,
           top_p: options.topP,
@@ -164,7 +253,7 @@ export function buildProviderRequest(provider, apiKey, messages, options = {}) {
         body: JSON.stringify(defined({
           model: provider.model_name,
           messages,
-          stream: false,
+          stream,
           max_tokens: options.maxTokens,
           temperature: options.temperature,
           top_p: options.topP,
@@ -207,7 +296,6 @@ export function parseProviderResponse(provider, responseBody) {
     }
 
     case 'ollama': {
-      // Native Ollama message format
       if (responseBody.message?.content !== undefined) {
         return {
           content: responseBody.message.content ?? '',
@@ -216,7 +304,6 @@ export function parseProviderResponse(provider, responseBody) {
           usage: usageFrom(responseBody.prompt_eval_count, responseBody.eval_count),
         };
       }
-      // OpenAI-compatible format
       const choice = responseBody.choices?.[0];
       return {
         content: choice?.message?.content ?? '',
@@ -241,47 +328,27 @@ export function parseProviderResponse(provider, responseBody) {
 }
 
 export async function embedText(provider, apiKey, text) {
-  const model = provider.embedding_model_name || provider.model_name;
-  let url;
-  let headers = { 'Content-Type': 'application/json' };
-  let body;
+  validateProviderUrl(provider);
+  const model = provider.embedding_model_name || 'text-embedding-3-small';
+  const url = joinUrl(provider.base_url, '/embeddings');
 
-  if (provider.provider_type === 'google') {
-    url = `${provider.base_url.replace(/\/$/, '')}/v1beta/models/${encodeURIComponent(model)}:embedContent`;
-    headers['x-goog-api-key'] = apiKey;
-    body = { model: `models/${model}`, content: { parts: [{ text }] } };
-  } else if (provider.provider_type === 'ollama') {
-    if (apiKey && apiKey !== 'ollama') headers.Authorization = `Bearer ${apiKey}`;
-
-    // Ollama Cloud (https://ollama.com/api/embed) or native (/embed)
-    if (provider.base_url.endsWith('/api') || provider.endpoint === '/chat' || provider.endpoint === '/api/chat') {
-      url = joinUrl(provider.base_url, '/embed');
-      body = { model, input: text };
-    } else {
-      const derived = provider.endpoint.replace(/chat\/completions\/?$/i, 'embeddings').replace(/messages\/?$/i, 'embeddings');
-      url = joinUrl(provider.base_url, derived === provider.endpoint ? '/v1/embeddings' : derived);
-      body = { model, input: text };
-    }
-  } else {
-    const derived = provider.endpoint.replace(/chat\/completions\/?$/i, 'embeddings').replace(/messages\/?$/i, 'embeddings');
-    url = joinUrl(provider.base_url, derived === provider.endpoint ? '/v1/embeddings' : derived);
-    headers.Authorization = `Bearer ${apiKey}`;
-    body = { model, input: text };
+  if (provider.provider_type === 'ollama') {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
+      body: JSON.stringify({ model, prompt: text }),
+    });
+    if (!res.ok) throw new Error(`Embedding failed with HTTP ${res.status}`);
+    const json = await res.json();
+    return json.embedding;
   }
 
-  const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
-  if (!res.ok) {
-    throw new Error(`Embedding request failed (${res.status}): ${(await res.text()).slice(0, 300)}`);
-  }
-
-  const payload = await res.json();
-  const embedding =
-    provider.provider_type === 'google'
-      ? payload.embedding?.values
-      : payload.embeddings?.[0] ?? payload.data?.[0]?.embedding ?? payload.embedding;
-
-  if (!Array.isArray(embedding)) {
-    throw new Error(`Embedding model "${model}" did not return a valid vector.`);
-  }
-  return embedding;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify({ model, input: text }),
+  });
+  if (!res.ok) throw new Error(`Embedding failed with HTTP ${res.status}`);
+  const json = await res.json();
+  return json.data[0].embedding;
 }

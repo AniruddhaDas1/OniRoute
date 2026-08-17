@@ -3,9 +3,8 @@ import { cors } from 'https://deno.land/x/hono@v4.3.0/middleware.ts';
 import { getAuthUser, getServiceClient } from '../_shared/auth.ts';
 import type { AuthUser } from '../_shared/auth.ts';
 import { ALLOWED_HEADERS, ALLOWED_METHODS, allowedOrigins } from '../_shared/cors.ts';
-import { isCircuitOpen, recordFailure, recordSuccess } from '../_shared/circuit-breaker.ts';
 import { embedText } from '../_shared/embedding.ts';
-import { buildProviderRequest, normaliseMessages, parseProviderResponse, pruneContextToBudget } from '../_shared/provider-client.ts';
+import { buildProviderRequest, normaliseMessages, parseProviderResponse, pruneContextToBudget, validateProviderUrl } from '../_shared/provider-client.ts';
 import type { ChatMessage, CompletionOptions, ProviderResponse } from '../_shared/provider-client.ts';
 import { fetchWithTimeout, messageOf, runBackground } from '../_shared/runtime.ts';
 import { isFailoverError, isTransientFailure, resolveRouting, shuffle } from '../_shared/routing.ts';
@@ -497,6 +496,24 @@ app.post('/providers', sessionOnly, async (c) => {
   const required = ['name', 'provider_type', 'endpoint', 'base_url', 'model_name', 'api_key'];
   if (required.some((field) => !body[field]?.trim?.())) return c.json(err(`Missing required fields: ${required.join(', ')}`), 400);
   if (!isProviderType(body.provider_type)) return c.json(err('Unsupported provider type.'), 400);
+
+  try {
+    validateProviderUrl({
+      id: '',
+      user_id: user.id,
+      name: body.name.trim(),
+      provider_type: body.provider_type,
+      endpoint: body.endpoint.trim(),
+      base_url: body.base_url.trim(),
+      model_name: body.model_name.trim(),
+      priority: 0,
+      is_active: true,
+      created_at: '',
+    });
+  } catch (urlErr: any) {
+    return c.json(err(urlErr.message), 400);
+  }
+
   const service = getServiceClient();
   const { data: highest } = await service
     .from('ai_providers').select('priority').eq('user_id', user.id).order('priority', { ascending: false }).limit(1);
@@ -538,17 +555,26 @@ app.put('/providers/:id', sessionOnly, async (c) => {
   const id = c.req.param('id');
   const body = await c.req.json();
   const service = getServiceClient();
-  // POST validated the enum and PUT did not, so a bad value reached the CHECK
-  // constraint and surfaced as a 500 instead of a 400.
+
   if (body.provider_type !== undefined && !isProviderType(body.provider_type)) {
     return c.json(err('Unsupported provider type.'), 400);
   }
   const allowed = ['name', 'provider_type', 'endpoint', 'base_url', 'model_name', 'embedding_model_name', 'is_active'];
   const updates = Object.fromEntries(allowed.filter((field) => body[field] !== undefined).map((field) => [field, body[field]]));
   if (!Object.keys(updates).length && !body.api_key) return c.json(err('No editable provider fields were supplied.'), 400);
+
+  const { data: existing, error: fetchError } = await service.from('ai_providers').select('*').eq('id', id).eq('user_id', user.id).maybeSingle();
+  if (fetchError || !existing) return c.json(err('Provider not found.'), 404);
+
+  try {
+    validateProviderUrl({ ...existing, ...updates });
+  } catch (urlErr: any) {
+    return c.json(err(urlErr.message), 400);
+  }
+
   const { data, error } = Object.keys(updates).length
     ? await service.from('ai_providers').update(updates).eq('id', id).eq('user_id', user.id).select().maybeSingle()
-    : await service.from('ai_providers').select('*').eq('id', id).eq('user_id', user.id).maybeSingle();
+    : { data: existing, error: null };
   if (error || !data) return c.json(err('Provider not found.'), 404);
   if (body.api_key?.trim()) {
     const { error: secretError } = await service.rpc('upsert_provider_secret', { p_provider_id: id, p_secret: body.api_key.trim() });
@@ -785,7 +811,22 @@ app.get('/provider-groups', sessionOnly, async (c) => {
 app.post('/provider-groups', sessionOnly, async (c) => {
   const user = c.get('user');
   const body = await c.req.json();
-  const { data, error } = await getServiceClient()
+  const service = getServiceClient();
+
+  if (Array.isArray(body.provider_ids) && body.provider_ids.length > 0) {
+    const { data: owned } = await service
+      .from('ai_providers')
+      .select('id')
+      .eq('user_id', user.id)
+      .in('id', body.provider_ids);
+    const ownedIds = new Set((owned ?? []).map((p) => p.id));
+    const invalid = body.provider_ids.filter((pId: string) => !ownedIds.has(pId));
+    if (invalid.length > 0) {
+      return c.json(err(`Invalid provider IDs not owned by you: ${invalid.join(', ')}`), 400);
+    }
+  }
+
+  const { data, error } = await service
     .from('provider_groups')
     .insert({
       user_id: user.id,
@@ -803,13 +844,28 @@ app.put('/provider-groups/:id', sessionOnly, async (c) => {
   const user = c.get('user');
   const id = c.req.param('id');
   const body = await c.req.json();
+  const service = getServiceClient();
+
+  if (Array.isArray(body.provider_ids) && body.provider_ids.length > 0) {
+    const { data: owned } = await service
+      .from('ai_providers')
+      .select('id')
+      .eq('user_id', user.id)
+      .in('id', body.provider_ids);
+    const ownedIds = new Set((owned ?? []).map((p) => p.id));
+    const invalid = body.provider_ids.filter((pId: string) => !ownedIds.has(pId));
+    if (invalid.length > 0) {
+      return c.json(err(`Invalid provider IDs not owned by you: ${invalid.join(', ')}`), 400);
+    }
+  }
+
   const updates: Record<string, any> = { updated_at: new Date().toISOString() };
   if (body.name) updates.name = body.name.trim();
   if (body.description !== undefined) updates.description = body.description?.trim() || null;
   if (body.routing_mode) updates.routing_mode = body.routing_mode;
   if (Array.isArray(body.provider_ids)) updates.provider_ids = body.provider_ids;
 
-  const { data, error } = await getServiceClient()
+  const { data, error } = await service
     .from('provider_groups')
     .update(updates)
     .eq('id', id)

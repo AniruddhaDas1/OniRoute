@@ -4,7 +4,7 @@ import { join, extname } from 'node:path';
 import { app } from './app.mjs';
 
 const PORT = Number(process.env.PORT || 1001);
-const HOST = process.env.HOST || '0.0.0.0';
+const HOST = process.env.HOST || '127.0.0.1';
 const DIST_DIR = join(process.cwd(), 'dist');
 
 const MIME_TYPES = {

@@ -2,8 +2,11 @@ import type { ApiProvider, TokenUsage } from './types.ts';
 import { joinUrl } from './runtime.ts';
 
 export interface ChatMessage {
-  role: 'system' | 'user' | 'assistant';
+  role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
+  name?: string;
+  tool_call_id?: string;
+  tool_calls?: any[];
 }
 
 export interface CompletionOptions {
@@ -11,6 +14,7 @@ export interface CompletionOptions {
   temperature?: number;
   topP?: number;
   stop?: string[];
+  stream?: boolean;
 }
 
 export interface ProviderRequest {
@@ -30,43 +34,127 @@ export interface ProviderResponse {
 const DEFAULT_MAX_TOKENS = 4096;
 
 /**
- * Normalise whatever an OpenAI-compatible client sent us into the three roles
- * every upstream understands. Unknown roles (`tool`, `function`) are folded
- * into `user` rather than dropped, so their content still reaches the model.
+ * Validates provider endpoint URLs against known provider boundaries to prevent
+ * credential exfiltration or malicious redirect attacks.
  */
-export function normaliseMessages(raw: ReadonlyArray<{ role?: unknown; content?: unknown }>): ChatMessage[] {
+export function validateProviderUrl(provider: ApiProvider): void {
+  const fullUrl = joinUrl(provider.base_url, provider.endpoint);
+  let parsed: URL;
+  try {
+    parsed = new URL(fullUrl);
+  } catch {
+    throw new Error(`Invalid provider URL: ${fullUrl}`);
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`Unsupported URL protocol: ${parsed.protocol}`);
+  }
+
+  if (parsed.username || parsed.password) {
+    throw new Error('Provider URL cannot contain embedded credentials.');
+  }
+
+  const hostname = parsed.hostname.toLowerCase();
+
+  switch (provider.provider_type) {
+    case 'openai':
+      if (!hostname.endsWith('openai.com') && !hostname.endsWith('azure.com')) {
+        throw new Error(`Invalid OpenAI endpoint domain: "${hostname}". Expected api.openai.com or *.openai.azure.com.`);
+      }
+      break;
+
+    case 'anthropic':
+      if (!hostname.endsWith('anthropic.com')) {
+        throw new Error(`Invalid Anthropic endpoint domain: "${hostname}". Expected api.anthropic.com.`);
+      }
+      break;
+
+    case 'google':
+      if (!hostname.endsWith('googleapis.com')) {
+        throw new Error(`Invalid Google Gemini endpoint domain: "${hostname}". Expected generativelanguage.googleapis.com.`);
+      }
+      break;
+
+    case 'ollama': {
+      const isLoopback = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '0.0.0.0' || hostname.endsWith('.local');
+      const isCloud = hostname.endsWith('ollama.com') || hostname.endsWith('ollama.ai');
+      const isPrivateSubnet = /^10\.|^192\.168\.|^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(hostname);
+      if (!isLoopback && !isCloud && !isPrivateSubnet && parsed.protocol !== 'https:') {
+        throw new Error(`Invalid Ollama endpoint host: "${hostname}". Expected localhost, ollama.com, or private network.`);
+      }
+      break;
+    }
+
+    case 'custom':
+    default:
+      // Custom endpoints require valid HTTP(S) URL
+      if (!hostname) {
+        throw new Error('Custom provider must specify a valid hostname.');
+      }
+      break;
+  }
+}
+
+/**
+ * Normalise whatever an OpenAI-compatible client sent us into clean message turns.
+ * Preserves tool_calls, multimodal content, and roles.
+ */
+export function normaliseMessages(raw: ReadonlyArray<any>): ChatMessage[] {
   const messages: ChatMessage[] = [];
-  for (const item of raw) {
-    const content = typeof item.content === 'string'
-      ? item.content
-      // Content parts: [{type:'text',text:'…'}, …]
-      : Array.isArray(item.content)
-      ? item.content.map((part) => (typeof part === 'string' ? part : String((part as { text?: unknown })?.text ?? ''))).join('')
-      : '';
-    if (!content.trim()) continue;
-    const role = String(item.role ?? 'user').toLowerCase();
-    messages.push({
-      role: role === 'system' || role === 'developer' ? 'system' : role === 'assistant' || role === 'model' ? 'assistant' : 'user',
-      content,
-    });
+  for (const item of raw || []) {
+    let content = '';
+    if (typeof item.content === 'string') {
+      content = item.content;
+    } else if (Array.isArray(item.content)) {
+      content = item.content
+        .map((part: any) => {
+          if (typeof part === 'string') return part;
+          if (part?.type === 'text') return String(part.text ?? '');
+          if (part?.type === 'image_url') return `[Image: ${part.image_url?.url || ''}]`;
+          return '';
+        })
+        .join('');
+    } else if (item.content !== undefined && item.content !== null) {
+      content = String(item.content);
+    }
+
+    const rawRole = String(item.role ?? 'user').toLowerCase();
+    let role: ChatMessage['role'] = 'user';
+    if (rawRole === 'system' || rawRole === 'developer') role = 'system';
+    else if (rawRole === 'assistant' || rawRole === 'model') role = 'assistant';
+    else if (rawRole === 'tool' || rawRole === 'function') role = 'tool';
+
+    if (!content.trim() && !item.tool_calls && !item.tool_call_id) continue;
+
+    const msg: ChatMessage = { role, content };
+    if (item.name) msg.name = String(item.name);
+    if (item.tool_call_id) msg.tool_call_id = String(item.tool_call_id);
+    if (item.tool_calls) msg.tool_calls = item.tool_calls;
+
+    messages.push(msg);
   }
   return messages;
 }
 
-/** Collapse runs of the same role, which Anthropic and Google both reject. */
+/** Collapse runs of the same role for strict upstream providers (Anthropic, Google). */
 function mergeSameRole(messages: ChatMessage[]): ChatMessage[] {
   return messages.reduce<ChatMessage[]>((merged, message) => {
     const previous = merged.at(-1);
-    if (previous && previous.role === message.role) previous.content = `${previous.content}\n\n${message.content}`;
-    else merged.push({ ...message });
+    if (previous && previous.role === message.role && previous.role !== 'tool' && !previous.tool_calls) {
+      previous.content = `${previous.content}\n\n${message.content}`;
+    } else {
+      merged.push({ ...message });
+    }
     return merged;
   }, []);
 }
 
 function splitSystem(messages: ChatMessage[]): { system: string; turns: ChatMessage[] } {
-  const system = messages.filter((message) => message.role === 'system').map((message) => message.content).join('\n\n');
-  const turns = mergeSameRole(messages.filter((message) => message.role !== 'system'));
-  // Anthropic and Google both require the conversation to open on a user turn.
+  const system = messages
+    .filter((m) => m.role === 'system')
+    .map((m) => m.content)
+    .join('\n\n');
+  const turns = mergeSameRole(messages.filter((m) => m.role !== 'system'));
   while (turns.length && turns[0].role === 'assistant') turns.shift();
   return { system, turns };
 }
@@ -91,11 +179,11 @@ export function pruneContextToBudget(
   const keptTurns: ChatMessage[] = [];
   const lastTurn = turns[turns.length - 1];
   keptTurns.unshift(lastTurn);
-  currentChars += lastTurn.content.length;
+  currentChars += (lastTurn.content || '').length;
 
   for (let i = turns.length - 2; i >= 0; i--) {
     const turn = turns[i];
-    const turnLen = turn.content.length;
+    const turnLen = (turn.content || '').length;
     if (currentChars + turnLen > maxChars) {
       break;
     }
@@ -112,7 +200,9 @@ export function buildProviderRequest(
   messages: ChatMessage[],
   options: CompletionOptions = {},
 ): ProviderRequest {
+  validateProviderUrl(provider);
   const url = joinUrl(provider.base_url, provider.endpoint);
+  const stream = Boolean(options.stream);
 
   switch (provider.provider_type) {
     case 'anthropic': {
@@ -128,16 +218,25 @@ export function buildProviderRequest(
           temperature: options.temperature,
           top_p: options.topP,
           stop_sequences: options.stop,
+          stream,
         })),
       };
     }
 
     case 'google': {
       const { system, turns } = splitSystem(messages);
+      // For Google streaming, endpoint can use streamGenerateContent
+      let googleUrl = url;
+      if (stream && !googleUrl.includes('streamGenerateContent')) {
+        googleUrl = googleUrl.replace(':generateContent', ':streamGenerateContent');
+        if (!googleUrl.includes(':streamGenerateContent')) {
+          googleUrl = `${googleUrl}:streamGenerateContent?alt=sse`;
+        } else if (!googleUrl.includes('alt=sse')) {
+          googleUrl = `${googleUrl}&alt=sse`;
+        }
+      }
       return {
-        // The key travels as a header rather than a query parameter so it stays
-        // out of proxy and CDN access logs.
-        url,
+        url: googleUrl,
         headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
         body: JSON.stringify(defined({
           contents: turns.map((message) => ({
@@ -166,7 +265,7 @@ export function buildProviderRequest(
           body: JSON.stringify(defined({
             model: provider.model_name,
             messages,
-            stream: false,
+            stream,
             options: defined({
               temperature: options.temperature,
               top_p: options.topP,
@@ -183,7 +282,7 @@ export function buildProviderRequest(
         body: JSON.stringify(defined({
           model: provider.model_name,
           messages,
-          stream: false,
+          stream,
           max_tokens: options.maxTokens,
           temperature: options.temperature,
           top_p: options.topP,
@@ -201,7 +300,7 @@ export function buildProviderRequest(
         body: JSON.stringify(defined({
           model: provider.model_name,
           messages,
-          stream: false,
+          stream,
           max_tokens: options.maxTokens,
           temperature: options.temperature,
           top_p: options.topP,

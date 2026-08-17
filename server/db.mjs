@@ -1,10 +1,12 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, renameSync, copyFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { encryptSecret, decryptSecret } from './crypto.mjs';
 
 const DATA_DIR = join(process.cwd(), 'data');
 const DB_FILE = join(DATA_DIR, 'oniroute_store.json');
+const DB_BAK = join(DATA_DIR, 'oniroute_store.json.bak');
+const DB_TMP = join(DATA_DIR, 'oniroute_store.json.tmp');
 
 if (!existsSync(DATA_DIR)) {
   mkdirSync(DATA_DIR, { recursive: true });
@@ -15,11 +17,31 @@ export const LOCAL_USER_ID = '00000000-0000-0000-0000-000000000000';
 function loadState() {
   if (existsSync(DB_FILE)) {
     try {
-      return JSON.parse(readFileSync(DB_FILE, 'utf8'));
-    } catch {
-      // backup corrupt file
+      const data = readFileSync(DB_FILE, 'utf8');
+      return JSON.parse(data);
+    } catch (err) {
+      console.error(`[db] Primary store corrupt (${err.message}). Attempting recovery from backup...`);
+      if (existsSync(DB_BAK)) {
+        try {
+          const bakData = readFileSync(DB_BAK, 'utf8');
+          const recovered = JSON.parse(bakData);
+          console.warn('[db] Successfully recovered state from oniroute_store.json.bak.');
+          return recovered;
+        } catch (bakErr) {
+          console.error(`[db] Backup file also unreadable (${bakErr.message}).`);
+        }
+      }
+      const corruptFile = join(DATA_DIR, `oniroute_store.json.corrupt.${Date.now()}`);
+      try {
+        renameSync(DB_FILE, corruptFile);
+        console.warn(`[db] Preserved corrupt database as ${corruptFile}`);
+      } catch (renameErr) {
+        void renameErr;
+      }
+      throw new Error(`Database file is corrupted. Preserved as backup. ${err.message}`);
     }
   }
+
   return {
     providers: [],
     provider_groups: [],
@@ -41,7 +63,17 @@ function loadState() {
 let state = loadState();
 
 function persist() {
-  writeFileSync(DB_FILE, JSON.stringify(state, null, 2), 'utf8');
+  const json = JSON.stringify(state, null, 2);
+  // Atomic write pattern: write to tmp file, flush, then rename
+  writeFileSync(DB_TMP, json, 'utf8');
+  if (existsSync(DB_FILE)) {
+    try {
+      copyFileSync(DB_FILE, DB_BAK);
+    } catch (copyErr) {
+      void copyErr;
+    }
+  }
+  renameSync(DB_TMP, DB_FILE);
 }
 
 export const db = {

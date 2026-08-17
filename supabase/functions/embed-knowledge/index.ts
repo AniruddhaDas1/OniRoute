@@ -105,44 +105,63 @@ async function ingest(base: KnowledgeBase): Promise<IngestStats> {
   if (split.truncationReason) stats.truncation_reason = split.truncationReason;
   await saveProgress(base.id, stats);
 
-  let embedded = 0;
-  const vectors = await mapWithConcurrency(split.chunks, EMBED_CONCURRENCY, async (chunk, index) => {
-    const embedding = await embedText(provider, apiKey, chunk);
-    embedded += 1;
-    if (embedded % PROGRESS_EVERY === 0) {
-      // Fire-and-forget: a failed progress write must not fail the ingestion.
-      saveProgress(base.id, { ...stats, chunks_embedded: embedded }).catch(() => {});
+  // Heartbeat lease renewal: periodically touch ingest_started_at every 60s
+  // so legitimate large ingestion jobs never expire prematurely while running.
+  const leaseHeartbeat = setInterval(async () => {
+    try {
+      await service
+        .from('knowledge_bases')
+        .update({ ingest_started_at: new Date().toISOString() })
+        .eq('id', base.id)
+        .eq('status', 'processing');
+    } catch {
+      // Non-fatal heartbeat error
     }
-    return { content: chunk, embedding, index };
-  });
+  }, 60_000);
 
-  // Replace rather than append, so re-ingesting a source does not leave stale
-  // chunks from the previous revision alongside the new ones.
-  const { error: clearError } = await service.from('vector_chunks').delete().eq('knowledge_base_id', base.id);
-  if (clearError) throw new Error(`Could not clear the previous chunks: ${clearError.message}`);
+  let embedded = 0;
+  let vectors: any[] = [];
+  try {
+    vectors = await mapWithConcurrency(split.chunks, EMBED_CONCURRENCY, async (chunk, index) => {
+      const embedding = await embedText(provider, apiKey, chunk);
+      embedded += 1;
+      if (embedded % PROGRESS_EVERY === 0) {
+        // Fire-and-forget: a failed progress write must not fail the ingestion.
+        saveProgress(base.id, { ...stats, chunks_embedded: embedded }).catch(() => {});
+      }
+      return { content: chunk, embedding, index };
+    });
 
-  for (let start = 0; start < vectors.length; start += INSERT_BATCH) {
-    const batch = vectors.slice(start, start + INSERT_BATCH).map((vector) => ({
-      knowledge_base_id: base.id,
-      user_id: base.user_id,
-      content: vector.content,
-      metadata: { chunk_index: vector.index, source_type: base.source_type },
-      embedding: vector.embedding,
-    }));
-    const { error } = await service.from('vector_chunks').insert(batch);
-    if (error) throw new Error(`Could not store chunks ${start}–${start + batch.length}: ${error.message}`);
+    // Replace rather than append, so re-ingesting a source does not leave stale
+    // chunks from the previous revision alongside the new ones.
+    const { error: clearError } = await service.from('vector_chunks').delete().eq('knowledge_base_id', base.id);
+    if (clearError) throw new Error(`Could not clear the previous chunks: ${clearError.message}`);
+
+    for (let start = 0; start < vectors.length; start += INSERT_BATCH) {
+      const batch = vectors.slice(start, start + INSERT_BATCH).map((vector) => ({
+        knowledge_base_id: base.id,
+        user_id: base.user_id,
+        content: vector.content,
+        metadata: { chunk_index: vector.index, source_type: base.source_type },
+        embedding: vector.embedding,
+      }));
+      const { error } = await service.from('vector_chunks').insert(batch);
+      if (error) throw new Error(`Could not store chunks ${start}–${start + batch.length}: ${error.message}`);
+    }
+
+    stats.chunks_embedded = vectors.length;
+    await service.from('knowledge_bases').update({
+      status: 'complete',
+      error_message: null,
+      chunk_count: vectors.length,
+      ingest_completed_at: new Date().toISOString(),
+      ingest_stats: stats,
+    }).eq('id', base.id);
+
+    return stats;
+  } finally {
+    clearInterval(leaseHeartbeat);
   }
-
-  stats.chunks_embedded = vectors.length;
-  await service.from('knowledge_bases').update({
-    status: 'complete',
-    error_message: null,
-    chunk_count: vectors.length,
-    ingest_completed_at: new Date().toISOString(),
-    ingest_stats: stats,
-  }).eq('id', base.id);
-
-  return stats;
 }
 
 Deno.serve(async (req) => {
