@@ -7,6 +7,7 @@ import { embedText } from '../_shared/embedding.ts';
 import { buildProviderRequest, normaliseMessages, parseProviderResponse, parseProviderStreamLine, pruneContextToBudget, validateProviderUrl } from '../_shared/provider-client.ts';
 import type { ChatMessage, CompletionOptions, ProviderResponse, StreamDelta } from '../_shared/provider-client.ts';
 import { fetchWithTimeout, messageOf, runBackground } from '../_shared/runtime.ts';
+import { isCircuitOpen, recordFailure, recordSuccess } from '../_shared/circuit-breaker.ts';
 import { isFailoverError, isTransientFailure, resolveRouting, shuffle } from '../_shared/routing.ts';
 import { isProviderType, type ApiProvider, type LogStatus, type TokenUsage } from '../_shared/types.ts';
 
