@@ -1,5 +1,18 @@
 import { FormEvent, useEffect, useState } from 'react';
-import { ArrowDown, ArrowUp, CheckCircle2, AlertCircle, Loader2, Plus, PlugZap, Trash2, X, RefreshCw } from 'lucide-react';
+import {
+  ArrowDown,
+  ArrowUp,
+  CheckCircle2,
+  AlertCircle,
+  Loader2,
+  Plus,
+  PlugZap,
+  Trash2,
+  X,
+  RefreshCw,
+  Pencil,
+  Info,
+} from 'lucide-react';
 import { api } from '../lib/api';
 import type { ApiProvider } from '../types';
 
@@ -83,6 +96,7 @@ export default function ProvidersPage() {
   const [providers, setProviders] = useState<ApiProvider[]>([]);
   const [form, setForm] = useState(emptyForm);
   const [open, setOpen] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testStates, setTestStates] = useState<Record<string, ProviderTestState>>({});
@@ -100,21 +114,37 @@ export default function ProvidersPage() {
   }, []);
 
   function handleOpenAdd() {
+    setEditingId(null);
     setForm(emptyForm);
     setOpen(true);
   }
 
+  function handleEdit(provider: ApiProvider) {
+    setEditingId(provider.id);
+    setForm({
+      name: provider.name,
+      provider_type: provider.provider_type,
+      base_url: provider.base_url,
+      endpoint: provider.endpoint,
+      model_name: provider.model_name,
+      embedding_model_name: provider.embedding_model_name || '',
+      api_key: '', // Left blank to preserve current secret unless changing
+    });
+    setOpen(true);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
   function applyPreset(type: keyof typeof PRESETS) {
     const preset = PRESETS[type];
-    setForm({
-      name: preset.name,
+    setForm((prev) => ({
+      ...prev,
+      name: prev.name || preset.name,
       provider_type: preset.provider_type,
       base_url: preset.base_url,
       endpoint: preset.endpoint,
       model_name: preset.model_name,
       embedding_model_name: preset.embedding_model_name,
-      api_key: '',
-    });
+    }));
   }
 
   async function submit(event: FormEvent) {
@@ -122,25 +152,43 @@ export default function ProvidersPage() {
     setBusy(true);
     setNotice(null);
     try {
-      const saved = await api<ApiProvider>('/providers', {
-        method: 'POST',
-        body: JSON.stringify({
-          name: form.name.trim(),
-          provider_type: form.provider_type,
-          base_url: form.base_url.trim(),
-          endpoint: form.endpoint.trim(),
-          model_name: form.model_name.trim(),
-          embedding_model_name: form.embedding_model_name.trim() || null,
-          api_key: form.api_key.trim(),
-        }),
-      });
+      const payload: Record<string, any> = {
+        name: form.name.trim(),
+        provider_type: form.provider_type,
+        base_url: form.base_url.trim(),
+        endpoint: form.endpoint.trim(),
+        model_name: form.model_name.trim(),
+        embedding_model_name: form.embedding_model_name.trim() || null,
+      };
+
+      if (form.api_key.trim()) {
+        payload.api_key = form.api_key.trim();
+      }
+
+      if (editingId) {
+        await api(`/providers/${editingId}`, {
+          method: 'PUT',
+          body: JSON.stringify(payload),
+        });
+        setNotice({
+          type: 'success',
+          message: `Updated provider “${form.name}” successfully.`,
+        });
+      } else {
+        const saved = await api<ApiProvider>('/providers', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        });
+        setNotice({
+          type: 'success',
+          message: `Saved provider “${saved?.name || form.name}”. Key is securely stored in encrypted vault.`,
+        });
+      }
+
       setForm(emptyForm);
+      setEditingId(null);
       setOpen(false);
       await load();
-      setNotice({
-        type: 'success',
-        message: `Saved provider “${saved?.name || form.name}”. Key is securely stored in encrypted vault.`,
-      });
     } catch (error) {
       setNotice({
         type: 'error',
@@ -276,13 +324,17 @@ export default function ProvidersPage() {
         </div>
       )}
 
-      {/* Add Provider Form */}
+      {/* Add / Edit Provider Form */}
       {open && (
         <form onSubmit={submit} className="grid gap-4 rounded-xl border border-gray-200 bg-white p-6 shadow-sm md:grid-cols-2 animate-in fade-in zoom-in-95 duration-150">
           <div className="md:col-span-2 flex flex-wrap items-center justify-between gap-2 border-b border-gray-100 pb-4">
             <div>
-              <h2 className="text-base font-semibold text-gray-900">Add New AI Provider</h2>
-              <p className="text-xs text-gray-500 mt-0.5">Click a quick preset or fill in your provider details manually.</p>
+              <h2 className="text-base font-semibold text-gray-900">
+                {editingId ? 'Edit AI Provider' : 'Add New AI Provider'}
+              </h2>
+              <p className="text-xs text-gray-500 mt-0.5">
+                {editingId ? 'Update your provider configuration or API key.' : 'Click a quick preset or fill in your provider details manually.'}
+              </p>
             </div>
             <div className="flex flex-wrap items-center gap-1.5 text-xs">
               <span className="text-gray-400 font-medium mr-1">Quick Presets:</span>
@@ -395,32 +447,47 @@ export default function ProvidersPage() {
           </label>
 
           <label className="text-sm font-medium">
-            Embedding Model <span className="font-normal text-gray-400">(for Vector RAG)</span>
+            Embedding Model <span className="font-normal text-gray-400">(Optional for Vector RAG)</span>
             <input
               className={input}
               value={form.embedding_model_name}
               onChange={(e) => setForm({ ...form, embedding_model_name: e.target.value })}
-              placeholder="e.g. text-embedding-3-small or nomic-embed-text"
+              placeholder="e.g. nomic-embed-text, text-embedding-3-small"
             />
           </label>
 
+          {/* Embedding Model Guidance Box */}
+          <div className="md:col-span-2 rounded-lg bg-slate-50 border border-slate-200/80 p-3 text-xs text-slate-600 flex items-start gap-2">
+            <Info className="h-4 w-4 text-violet-600 shrink-0 mt-0.5" />
+            <div className="space-y-0.5">
+              <p className="font-semibold text-slate-800">What is the Embedding Model?</p>
+              <p>
+                Used only if you index documents in the <strong>Knowledge Base</strong>. It transforms text into vectors.
+                Leave blank if you only need chat. Recommended: <code>nomic-embed-text</code> (Ollama), <code>text-embedding-3-small</code> (OpenAI), or <code>text-embedding-004</code> (Gemini).
+              </p>
+            </div>
+          </div>
+
           <label className="md:col-span-2 text-sm font-medium">
-            API Key
+            API Key {editingId && <span className="font-normal text-gray-400">(leave blank to keep current key)</span>}
             <input
-              required
+              required={!editingId}
               type="password"
               autoComplete="new-password"
               className={input}
               value={form.api_key}
               onChange={(e) => setForm({ ...form, api_key: e.target.value })}
-              placeholder="Enter provider API key (or 'ollama' for offline local instance)"
+              placeholder={editingId ? '•••••••••••••••• (leave blank to keep)' : 'Enter provider API key'}
             />
           </label>
 
           <div className="md:col-span-2 flex justify-end gap-3 pt-3 border-t border-gray-100">
             <button
               type="button"
-              onClick={() => setOpen(false)}
+              onClick={() => {
+                setOpen(false);
+                setEditingId(null);
+              }}
               className="rounded-lg px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 transition-colors"
             >
               Cancel
@@ -429,13 +496,13 @@ export default function ProvidersPage() {
               disabled={busy}
               className="rounded-lg bg-violet-600 px-5 py-2 text-sm font-medium text-white hover:bg-violet-700 disabled:opacity-50 transition-colors shadow-sm"
             >
-              {busy ? 'Saving…' : 'Save Provider'}
+              {busy ? 'Saving…' : editingId ? 'Update Provider' : 'Save Provider'}
             </button>
           </div>
         </form>
       )}
 
-      {/* Providers List with Dedicated Status Indicator on Each Line */}
+      {/* Providers List with Edit, Test, Move, Delete */}
       <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
         {!providers.length ? (
           <div className="p-12 text-center">
@@ -520,6 +587,14 @@ export default function ProvidersPage() {
                       title="Decrease priority"
                     >
                       <ArrowDown className="h-4 w-4" />
+                    </button>
+
+                    <button
+                      onClick={() => handleEdit(provider)}
+                      className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 transition-colors"
+                      title="Edit provider"
+                    >
+                      <Pencil className="h-3.5 w-3.5" /> Edit
                     </button>
 
                     <button

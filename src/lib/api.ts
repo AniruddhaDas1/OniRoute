@@ -78,6 +78,15 @@ function mockResponse<T>(path: string, options: RequestInit = {}): T | null {
   if (path.startsWith('/providers/')) {
     const id = path.replace('/providers/', '');
     let list = getDemoStore('providers', []);
+    if (method === 'PUT') {
+      const idx = list.findIndex((p: any) => p.id === id);
+      if (idx !== -1) {
+        list[idx] = { ...list[idx], ...body };
+        setDemoStore('providers', list);
+        return list[idx] as T;
+      }
+      return null;
+    }
     if (method === 'DELETE') {
       list = list.filter((p: any) => p.id !== id);
       setDemoStore('providers', list);
