@@ -1015,9 +1015,10 @@ const handleModels = async (c: Context<Env>) => {
 
 app.get('/v1/models', handleModels);
 app.get('/models', handleModels);
+app.get('/v1/v1/models', handleModels);
 
-// Support both /v1/chat/completions and /chat/completions
-app.post('/chat/completions', async (c) => {
+// Support both /v1/chat/completions, /chat/completions, and /v1/v1/chat/completions
+const handleChatCompletions = async (c: Context<Env>) => {
   try {
     const result = await routedChat(c.get('user'), await c.req.json());
     return c.json({
@@ -1033,6 +1034,10 @@ app.post('/chat/completions', async (c) => {
     const status = error instanceof RequestError ? error.status : 502;
     return c.json({ error: { message: messageOf(error), type: 'routing_error' } }, status as 400);
   }
-});
+};
+
+app.post('/v1/chat/completions', handleChatCompletions);
+app.post('/chat/completions', handleChatCompletions);
+app.post('/v1/v1/chat/completions', handleChatCompletions);
 
 Deno.serve(app.fetch);
