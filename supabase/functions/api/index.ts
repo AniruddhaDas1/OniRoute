@@ -11,7 +11,14 @@ import { fetchWithTimeout, messageOf, runBackground } from '../_shared/runtime.t
 import { isFailoverError, isTransientFailure, resolveRouting, shuffle } from '../_shared/routing.ts';
 import { isProviderType, type ApiProvider, type LogStatus, type TokenUsage } from '../_shared/types.ts';
 
-type Caller = AuthUser & { gatewayKeyId?: string; maxContextTokens?: number | null };
+type Caller = AuthUser & {
+  gatewayKeyId?: string;
+  maxContextTokens?: number | null;
+  role?: string;
+  isActive?: boolean;
+  accessGranted?: boolean;
+  isSuperAdmin?: boolean;
+};
 type Env = { Variables: { user: Caller } };
 
 type ChatBody = {
@@ -41,21 +48,15 @@ class RequestError extends Error {
   }
 }
 
+const ok = <T>(data: T) => ({ data, error: null });
+const err = (error: string) => ({ data: null, error });
+
 const app = new Hono<Env>();
+app.use('*', cors({ origin: allowedOrigins(), allowMethods: ALLOWED_METHODS, allowHeaders: ALLOWED_HEADERS }));
 
-app.use('*', cors({
-  origin: allowedOrigins(),
-  allowHeaders: ALLOWED_HEADERS,
-  allowMethods: ALLOWED_METHODS,
-}));
-
-function ok(data: unknown) { return { data, error: null }; }
-function err(message: string) { return { data: null, error: message }; }
-
-async function sha256(value: string): Promise<string> {
-  const bytes = new TextEncoder().encode(value);
-  const hash = await crypto.subtle.digest('SHA-256', bytes);
-  return Array.from(new Uint8Array(hash)).map((byte) => byte.toString(16).padStart(2, '0')).join('');
+async function sha256(input: string): Promise<string> {
+  const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input));
+  return Array.from(new Uint8Array(hash)).map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 function createGatewayKey(): string {
@@ -63,16 +64,38 @@ function createGatewayKey(): string {
   return `or_${Array.from(bytes).map((byte) => byte.toString(16).padStart(2, '0')).join('')}`;
 }
 
-async function authenticate(req: Request): Promise<Caller | null> {
-  const authHeader = req.headers.get('Authorization');
-  const sessionUser = await getAuthUser(authHeader);
-  if (sessionUser) return sessionUser;
+async function authenticate(request: Request): Promise<Caller | null> {
+  const authHeader = request.headers.get('Authorization') ?? '';
+  const keyHeader = request.headers.get('x-oniroute-key');
+  const service = getServiceClient();
 
-  const bearer = authHeader?.replace(/^Bearer\s+/i, '') ?? '';
-  const key = req.headers.get('x-oniroute-key') ?? (bearer.startsWith('or_') ? bearer : '');
+  if (authHeader.startsWith('Bearer ') && !keyHeader && !authHeader.slice(7).startsWith('or_')) {
+    const user = await getAuthUser(authHeader);
+    if (!user) return null;
+
+    const { data: profile } = await service
+      .from('profiles')
+      .select('id, email, role, is_active, access_granted')
+      .eq('id', user.id)
+      .maybeSingle();
+
+    const isSuperAdmin =
+      user.email?.toLowerCase() === 'leadspree24x7@gmail.com' ||
+      profile?.role === 'super_admin' ||
+      profile?.email?.toLowerCase() === 'leadspree24x7@gmail.com';
+
+    return {
+      ...user,
+      role: isSuperAdmin ? 'super_admin' : (profile?.role ?? 'member'),
+      isActive: profile ? profile.is_active : true,
+      accessGranted: profile ? profile.access_granted : true,
+      isSuperAdmin,
+    };
+  }
+
+  const key = (keyHeader ?? authHeader.replace(/^Bearer\s+/i, '')).trim();
   if (!key.startsWith('or_')) return null;
 
-  const service = getServiceClient();
   const keyHash = await sha256(key);
   const { data } = await service
     .from('gateway_api_keys')
@@ -81,33 +104,61 @@ async function authenticate(req: Request): Promise<Caller | null> {
     .is('revoked_at', null)
     .maybeSingle();
   if (!data) return null;
-  // Off the hot path: this used to add a full database round trip to the
-  // latency of every single inference request.
+
+  const { data: profile } = await service
+    .from('profiles')
+    .select('id, email, role, is_active, access_granted')
+    .eq('id', data.user_id)
+    .maybeSingle();
+
+  const isSuperAdmin =
+    profile?.role === 'super_admin' ||
+    profile?.email?.toLowerCase() === 'leadspree24x7@gmail.com';
+
   runBackground(
-    // PostgREST builders are PromiseLike, not Promise, so they need adopting.
     Promise.resolve(service.from('gateway_api_keys').update({ last_used_at: new Date().toISOString() }).eq('id', data.id)),
     'gateway-key-touch',
   );
-  return { id: data.user_id, email: '', gatewayKeyId: data.id, maxContextTokens: data.max_context_tokens };
+
+  return {
+    id: data.user_id,
+    email: profile?.email ?? '',
+    gatewayKeyId: data.id,
+    maxContextTokens: data.max_context_tokens,
+    role: isSuperAdmin ? 'super_admin' : (profile?.role ?? 'member'),
+    isActive: profile ? profile.is_active : true,
+    accessGranted: profile ? profile.access_granted : true,
+    isSuperAdmin,
+  };
 }
 
 app.use('*', async (c, next) => {
   const user = await authenticate(c.req.raw);
   if (!user) return c.json(err('Unauthorized. Use a Supabase session or an OniRoute API key.'), 401);
+  if (user.isActive === false || user.accessGranted === false) {
+    return c.json(err('Your account access has been suspended by the administrator (leadspree24x7@gmail.com).'), 403);
+  }
   c.set('user', user);
   await next();
 });
 
 /**
  * Control-plane guard.
- *
- * A gateway key is an inference credential. Without this, one could read and
- * delete providers, revoke keys, and — worst — mint fresh gateway keys, so a key
- * pasted into a client app or a CI variable was a full account takeover.
  */
 async function sessionOnly(c: Context<Env>, next: Next) {
   if (c.get('user').gatewayKeyId) {
     return c.json(err('Gateway keys may only call /chat and /v1/chat/completions. Use a signed-in dashboard session to manage this account.'), 403);
+  }
+  await next();
+}
+
+/**
+ * Super Admin guard.
+ */
+async function superAdminOnly(c: Context<Env>, next: Next) {
+  const user = c.get('user');
+  if (!user.isSuperAdmin) {
+    return c.json(err('Access denied. Super Admin privileges required.'), 403);
   }
   await next();
 }
@@ -675,6 +726,104 @@ app.delete('/gateway-keys/:id', sessionOnly, async (c) => {
     .from('gateway_api_keys').update({ revoked_at: new Date().toISOString() })
     .eq('id', c.req.param('id')).eq('user_id', user.id);
   return error ? c.json(err(error.message), 500) : c.json(ok({ revoked: true }));
+});
+
+// =============================================================================
+// Super Admin & Team Management (leadspree24x7@gmail.com)
+// =============================================================================
+
+app.get('/admin/members', sessionOnly, superAdminOnly, async (c) => {
+  const service = getServiceClient();
+  const { data: profiles, error } = await service
+    .from('profiles')
+    .select('*')
+    .order('created_at', { ascending: false });
+
+  if (error) return c.json(err(error.message), 500);
+
+  const members = await Promise.all(
+    (profiles ?? []).map(async (p: any) => {
+      const isSuper = p.role === 'super_admin' || p.email?.toLowerCase() === 'leadspree24x7@gmail.com';
+      const [
+        { count: providersCount },
+        { count: keysCount },
+        { count: knowledgeCount },
+        { count: requestsCount },
+      ] = await Promise.all([
+        service.from('ai_providers').select('*', { count: 'exact', head: true }).eq('user_id', p.id),
+        service.from('gateway_api_keys').select('*', { count: 'exact', head: true }).eq('user_id', p.id).is('revoked_at', null),
+        service.from('knowledge_bases').select('*', { count: 'exact', head: true }).eq('user_id', p.id),
+        service.from('request_logs').select('*', { count: 'exact', head: true }).eq('user_id', p.id),
+      ]);
+
+      return {
+        ...p,
+        role: isSuper ? 'super_admin' : (p.role ?? 'member'),
+        providers_count: providersCount ?? 0,
+        keys_count: keysCount ?? 0,
+        knowledge_count: knowledgeCount ?? 0,
+        total_requests: requestsCount ?? 0,
+      };
+    }),
+  );
+
+  return c.json(ok(members));
+});
+
+app.patch('/admin/members/:id', sessionOnly, superAdminOnly, async (c) => {
+  const targetId = c.req.param('id');
+  const body = await c.req.json().catch(() => ({}));
+  const service = getServiceClient();
+
+  const { data: targetProfile } = await service
+    .from('profiles')
+    .select('*')
+    .eq('id', targetId)
+    .maybeSingle();
+
+  if (!targetProfile) return c.json(err('Member not found.'), 404);
+
+  if (targetProfile.email?.toLowerCase() === 'leadspree24x7@gmail.com') {
+    if (body.role && body.role !== 'super_admin') {
+      return c.json(err('Cannot demote root Super Admin.'), 400);
+    }
+    if (body.is_active === false || body.access_granted === false) {
+      return c.json(err('Cannot suspend root Super Admin.'), 400);
+    }
+  }
+
+  const updates: Record<string, any> = { updated_at: new Date().toISOString() };
+  if (body.role !== undefined) updates.role = body.role;
+  if (body.is_active !== undefined) updates.is_active = Boolean(body.is_active);
+  if (body.access_granted !== undefined) updates.access_granted = Boolean(body.access_granted);
+
+  const { data, error } = await service
+    .from('profiles')
+    .update(updates)
+    .eq('id', targetId)
+    .select()
+    .single();
+
+  return error ? c.json(err(error.message), 500) : c.json(ok(data));
+});
+
+app.delete('/admin/members/:id', sessionOnly, superAdminOnly, async (c) => {
+  const targetId = c.req.param('id');
+  const service = getServiceClient();
+
+  const { data: targetProfile } = await service
+    .from('profiles')
+    .select('*')
+    .eq('id', targetId)
+    .maybeSingle();
+
+  if (!targetProfile) return c.json(err('Member not found.'), 404);
+  if (targetProfile.email?.toLowerCase() === 'leadspree24x7@gmail.com') {
+    return c.json(err('Cannot delete root Super Admin account.'), 400);
+  }
+
+  const { error } = await service.from('profiles').delete().eq('id', targetId);
+  return error ? c.json(err(error.message), 500) : c.json(ok({ deleted: true }));
 });
 
 // =============================================================================

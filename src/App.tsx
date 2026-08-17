@@ -16,6 +16,7 @@ const RoutingPage = lazy(() => import('./pages/RoutingPage'));
 const KnowledgePage = lazy(() => import('./pages/KnowledgePage'));
 const PlaygroundPage = lazy(() => import('./pages/PlaygroundPage'));
 const LogsPage = lazy(() => import('./pages/LogsPage'));
+const AdminMembersPage = lazy(() => import('./pages/AdminMembersPage'));
 
 function PageFallback() {
   return (
@@ -43,6 +44,7 @@ export default function App() {
             <Route path="knowledge" element={<Suspense fallback={<PageFallback />}><KnowledgePage /></Suspense>} />
             <Route path="playground" element={<Suspense fallback={<PageFallback />}><PlaygroundPage /></Suspense>} />
             <Route path="logs" element={<Suspense fallback={<PageFallback />}><LogsPage /></Suspense>} />
+            <Route path="members" element={<Suspense fallback={<PageFallback />}><AdminMembersPage /></Suspense>} />
           </Route>
         </Route>
       </Routes>

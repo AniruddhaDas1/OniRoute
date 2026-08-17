@@ -169,6 +169,86 @@ function mockResponse<T>(path: string, options: RequestInit = {}): T | null {
     }
   }
 
+  if (path === '/admin/members') {
+    const defaultMembers = [
+      {
+        id: 'super-admin-001',
+        email: 'leadspree24x7@gmail.com',
+        role: 'super_admin',
+        is_active: true,
+        access_granted: true,
+        created_at: '2026-07-20T10:00:00Z',
+        updated_at: new Date().toISOString(),
+        providers_count: 3,
+        keys_count: 2,
+        knowledge_count: 1,
+        total_requests: 142,
+      },
+      {
+        id: 'member-002',
+        email: 'developer@example.com',
+        role: 'member',
+        is_active: true,
+        access_granted: true,
+        created_at: '2026-08-01T14:30:00Z',
+        updated_at: new Date().toISOString(),
+        providers_count: 1,
+        keys_count: 1,
+        knowledge_count: 0,
+        total_requests: 38,
+      },
+    ];
+    return getDemoStore('admin_members', defaultMembers) as T;
+  }
+
+  if (path.startsWith('/admin/members/')) {
+    const id = path.replace('/admin/members/', '');
+    let members = getDemoStore('admin_members', [
+      {
+        id: 'super-admin-001',
+        email: 'leadspree24x7@gmail.com',
+        role: 'super_admin',
+        is_active: true,
+        access_granted: true,
+        created_at: '2026-07-20T10:00:00Z',
+        updated_at: new Date().toISOString(),
+        providers_count: 3,
+        keys_count: 2,
+        knowledge_count: 1,
+        total_requests: 142,
+      },
+      {
+        id: 'member-002',
+        email: 'developer@example.com',
+        role: 'member',
+        is_active: true,
+        access_granted: true,
+        created_at: '2026-08-01T14:30:00Z',
+        updated_at: new Date().toISOString(),
+        providers_count: 1,
+        keys_count: 1,
+        knowledge_count: 0,
+        total_requests: 38,
+      },
+    ]);
+
+    if (method === 'PATCH') {
+      const idx = members.findIndex((m: any) => m.id === id);
+      if (idx !== -1) {
+        members[idx] = { ...members[idx], ...body, updated_at: new Date().toISOString() };
+        setDemoStore('admin_members', members);
+        return members[idx] as T;
+      }
+      return null;
+    }
+
+    if (method === 'DELETE') {
+      members = members.filter((m: any) => m.id !== id);
+      setDemoStore('admin_members', members);
+      return { deleted: true } as T;
+    }
+  }
+
   if (path === '/chat') {
     return {
       response: 'Hello! This is a simulated response from OniRoute. Your request was successfully processed through the gateway routing pipeline.',

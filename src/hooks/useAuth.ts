@@ -9,7 +9,7 @@ function getDemoUser(): User | null {
   if (localStorage.getItem(DEMO_KEY) !== 'true') return null;
   return {
     id: 'demo-user',
-    email: 'demo@oniroute.local',
+    email: 'leadspree24x7@gmail.com', // Demo user uses leadspree super-admin identity for local sandbox testing
     user_metadata: {},
     app_metadata: {},
     aud: 'authenticated',
@@ -21,7 +21,7 @@ function getDemoUser(): User | null {
     phone: '',
     phone_confirmed_at: null,
     is_sso_user: false,
-    is_super_admin: false,
+    is_super_admin: true,
     is_anonymous: false,
     deleted_at: null,
   } as unknown as User;
@@ -40,7 +40,7 @@ export function useAuth() {
     if (isStandalone) {
       setUser({
         id: '00000000-0000-0000-0000-000000000000',
-        email: 'admin@oniroute.local',
+        email: 'leadspree24x7@gmail.com',
         aud: 'authenticated',
         role: 'authenticated',
       } as unknown as User);
@@ -73,6 +73,12 @@ export function useAuth() {
     };
   }, []);
 
+  const isSuperAdmin = Boolean(
+    user?.email &&
+      (user.email.toLowerCase() === 'leadspree24x7@gmail.com' ||
+        user.email === 'admin@oniroute.local')
+  );
+
   const signUp = async (email: string, password: string) => {
     const { error } = await supabase.auth.signUp({ email, password });
     return { error };
@@ -94,5 +100,5 @@ export function useAuth() {
     setUser(getDemoUser());
   };
 
-  return { user, loading, signUp, signIn, signOut, enableDemo };
+  return { user, loading, signUp, signIn, signOut, enableDemo, isSuperAdmin };
 }

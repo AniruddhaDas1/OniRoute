@@ -101,3 +101,23 @@ export interface GatewayKey {
   last_used_at: string | null;
   revoked_at: string | null;
 }
+
+export type UserRole = 'super_admin' | 'admin' | 'member';
+
+export interface UserProfile {
+  id: string;
+  email: string;
+  role: UserRole;
+  is_active: boolean;
+  access_granted: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AdminMember extends UserProfile {
+  providers_count?: number;
+  keys_count?: number;
+  knowledge_count?: number;
+  total_requests?: number;
+}
+

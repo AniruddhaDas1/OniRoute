@@ -277,4 +277,57 @@ export const db = {
     persist();
     return log;
   },
+
+  // --- Members / Super Admin ---
+  getMembers() {
+    if (!state.profiles || !state.profiles.length) {
+      state.profiles = [
+        {
+          id: LOCAL_USER_ID,
+          email: 'leadspree24x7@gmail.com',
+          role: 'super_admin',
+          is_active: true,
+          access_granted: true,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+      ];
+      persist();
+    }
+    return state.profiles.map((p) => {
+      const isSuper = p.role === 'super_admin' || p.email?.toLowerCase() === 'leadspree24x7@gmail.com';
+      return {
+        ...p,
+        role: isSuper ? 'super_admin' : (p.role ?? 'member'),
+        providers_count: state.providers.filter((pr) => pr.user_id === p.id).length,
+        keys_count: state.gateway_keys.filter((k) => k.user_id === p.id && !k.revoked_at).length,
+        knowledge_count: state.knowledge_bases.filter((kb) => kb.user_id === p.id).length,
+        total_requests: state.request_logs.filter((rl) => rl.user_id === p.id).length,
+      };
+    });
+  },
+
+  updateMember(id, updates) {
+    if (!state.profiles) state.profiles = [];
+    let profile = state.profiles.find((p) => p.id === id);
+    if (!profile && id === LOCAL_USER_ID) {
+      profile = {
+        id: LOCAL_USER_ID,
+        email: 'leadspree24x7@gmail.com',
+        role: 'super_admin',
+        is_active: true,
+        access_granted: true,
+        created_at: new Date().toISOString(),
+      };
+      state.profiles.push(profile);
+    }
+    if (!profile) return null;
+    if (profile.email?.toLowerCase() === 'leadspree24x7@gmail.com') {
+      if (updates.role && updates.role !== 'super_admin') throw new Error('Cannot demote root Super Admin.');
+      if (updates.is_active === false || updates.access_granted === false) throw new Error('Cannot suspend root Super Admin.');
+    }
+    Object.assign(profile, updates, { updated_at: new Date().toISOString() });
+    persist();
+    return profile;
+  },
 };

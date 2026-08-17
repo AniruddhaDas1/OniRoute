@@ -339,6 +339,23 @@ app.delete('/gateway-keys/:id', (c) => {
 });
 
 // Inference Routes (OpenAI compatible)
+// --- Super Admin & Member Management ---
+app.get('/admin/members', (c) => {
+  return c.json(ok(db.getMembers()));
+});
+
+app.patch('/admin/members/:id', async (c) => {
+  try {
+    const id = c.req.param('id');
+    const body = await c.req.json();
+    const updated = db.updateMember(id, body);
+    if (!updated) return c.json(err('Member not found'), 404);
+    return c.json(ok(updated));
+  } catch (error) {
+    return c.json(err(error.message), 400);
+  }
+});
+
 app.post('/chat', async (c) => {
   try {
     const authHeader = c.req.header('Authorization') || '';
