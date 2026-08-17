@@ -980,4 +980,59 @@ app.post('/v1/chat/completions', async (c) => {
   }
 });
 
+// Standard OpenAI Models Discovery (for Hermes Agent, Cursor, LangChain)
+const handleModels = async (c: Context<Env>) => {
+  const user = c.get('user');
+  const service = getServiceClient();
+  const { data: providers } = await service
+    .from('ai_providers')
+    .select('id, name, model_name, provider_type')
+    .eq('user_id', user.id)
+    .eq('is_active', true);
+
+  const modelList = (providers ?? []).map((p) => ({
+    id: p.model_name || p.name.toLowerCase().replace(/\s+/g, '-'),
+    object: 'model',
+    created: 1700000000,
+    owned_by: 'oniroute',
+  }));
+
+  // Include default gateway model alias
+  if (!modelList.some((m) => m.id === 'oniroute')) {
+    modelList.unshift({
+      id: 'oniroute',
+      object: 'model',
+      created: 1700000000,
+      owned_by: 'oniroute',
+    });
+  }
+
+  return c.json({
+    object: 'list',
+    data: modelList,
+  });
+};
+
+app.get('/v1/models', handleModels);
+app.get('/models', handleModels);
+
+// Support both /v1/chat/completions and /chat/completions
+app.post('/chat/completions', async (c) => {
+  try {
+    const result = await routedChat(c.get('user'), await c.req.json());
+    return c.json({
+      id: `chatcmpl_${crypto.randomUUID()}`,
+      object: 'chat.completion',
+      created: Math.floor(Date.now() / 1000),
+      model: result.model,
+      choices: [{ index: 0, message: { role: 'assistant', content: result.response }, finish_reason: result.finish_reason }],
+      usage: result.usage ?? { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+      oniroute: { provider: result.provider_used, mode: result.mode, latency_ms: result.latency_ms },
+    });
+  } catch (error) {
+    const status = error instanceof RequestError ? error.status : 502;
+    return c.json({ error: { message: messageOf(error), type: 'routing_error' } }, status as 400);
+  }
+});
+
 Deno.serve(app.fetch);
