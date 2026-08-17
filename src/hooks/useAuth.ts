@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
 import type { User } from '@supabase/supabase-js';
 
@@ -9,7 +9,7 @@ function getDemoUser(): User | null {
   if (localStorage.getItem(DEMO_KEY) !== 'true') return null;
   return {
     id: 'demo-user',
-    email: 'leadspree24x7@gmail.com', // Demo user uses leadspree super-admin identity for local sandbox testing
+    email: 'leadspree24x7@gmail.com',
     user_metadata: {},
     app_metadata: {},
     aud: 'authenticated',
@@ -31,12 +31,12 @@ export function useAuth() {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    const isStandalone = Boolean(
-      import.meta.env.VITE_API_URL ||
-      import.meta.env.VITE_SUPABASE_URL?.includes(':1001')
-    );
+  const isStandalone = Boolean(
+    import.meta.env.VITE_API_URL ||
+    import.meta.env.VITE_SUPABASE_URL?.includes(':1001')
+  );
 
+  useEffect(() => {
     if (isStandalone) {
       setUser({
         id: '00000000-0000-0000-0000-000000000000',
@@ -64,14 +64,18 @@ export function useAuth() {
     getSession();
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUser(session?.user ?? null);
+      if (localStorage.getItem(DEMO_KEY) === 'true') {
+        setUser(getDemoUser());
+      } else {
+        setUser(session?.user ?? null);
+      }
       setLoading(false);
     });
 
     return () => {
       subscription.unsubscribe();
     };
-  }, []);
+  }, [isStandalone]);
 
   const isSuperAdmin = Boolean(
     user?.email &&
@@ -85,15 +89,24 @@ export function useAuth() {
   };
 
   const signIn = async (email: string, password: string) => {
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    localStorage.removeItem(DEMO_KEY);
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    if (!error && data?.user) {
+      setUser(data.user);
+    }
     return { error };
   };
 
-  const signOut = async () => {
+  const signOut = useCallback(async () => {
     localStorage.removeItem(DEMO_KEY);
-    const { error } = await supabase.auth.signOut();
-    return { error };
-  };
+    setUser(null);
+    try {
+      await supabase.auth.signOut();
+    } catch {
+      // ignore
+    }
+    window.location.href = '/login';
+  }, []);
 
   const enableDemo = () => {
     localStorage.setItem(DEMO_KEY, 'true');
