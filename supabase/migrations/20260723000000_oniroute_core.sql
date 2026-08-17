@@ -39,7 +39,7 @@ CREATE TABLE public.profiles (
 -- Stores each user's configured AI providers (OpenAI, Anthropic, etc.).
 -- Priority ordering determines failover sequence.
 CREATE TABLE public.ai_providers (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
   provider_type TEXT NOT NULL CHECK (provider_type IN ('openai', 'anthropic', 'google', 'custom')),
@@ -65,7 +65,7 @@ CREATE TABLE public.ai_providers (
 --   UPDATE: rotate_secret(vault_key, new_value) -> vault_key stays the same
 --   DELETE: delete_secret(vault_key) -> remove from Vault, then delete this row
 CREATE TABLE public.api_keys_vault (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
   provider_id UUID NOT NULL REFERENCES public.ai_providers(id) ON DELETE CASCADE,
   vault_key TEXT NOT NULL,
@@ -78,7 +78,7 @@ CREATE TABLE public.api_keys_vault (
 -- One routing config per user (enforced by UNIQUE on user_id).
 -- Controls how requests are dispatched across providers.
 CREATE TABLE public.routing_configs (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE UNIQUE,
   mode TEXT NOT NULL DEFAULT 'priority' CHECK (mode IN ('priority', 'random')),
   failover_enabled BOOLEAN NOT NULL DEFAULT true,
@@ -93,7 +93,7 @@ CREATE TABLE public.routing_configs (
 -- Represents a user's knowledge base (uploaded file, repo, or raw text).
 -- Status tracks the ingestion pipeline: pending -> processing -> complete/error.
 CREATE TABLE public.knowledge_bases (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
   source_type TEXT NOT NULL CHECK (source_type IN ('file', 'repo', 'text')),
@@ -109,7 +109,7 @@ CREATE TABLE public.knowledge_bases (
 -- Stores chunked content and embeddings for RAG.
 -- Embedding dimension: 1536 (OpenAI text-embedding-3-small default).
 CREATE TABLE public.vector_chunks (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
   knowledge_base_id UUID NOT NULL REFERENCES public.knowledge_bases(id) ON DELETE CASCADE,
   content TEXT NOT NULL,
@@ -124,7 +124,7 @@ CREATE TABLE public.vector_chunks (
 -- Audit log for all routed requests. Tracks success/error/failover events
 -- with latency and optional error details.
 CREATE TABLE public.request_logs (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
   provider_id UUID REFERENCES public.ai_providers(id) ON DELETE SET NULL,
   status TEXT NOT NULL CHECK (status IN ('success', 'error', 'failover')),

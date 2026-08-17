@@ -5,5 +5,5 @@
 -- ceiling (e.g. 200k, 256k, 500k, 1M, or NULL for model default).
 -- =============================================================================
 
-ALTER TABLE public.gateway_keys
+ALTER TABLE public.gateway_api_keys
   ADD COLUMN IF NOT EXISTS max_context_tokens INTEGER DEFAULT NULL;

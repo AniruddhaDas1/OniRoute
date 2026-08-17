@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS public.profiles (
 
 -- 3. Table: ai_providers (Configured Upstream AI LLMs)
 CREATE TABLE IF NOT EXISTS public.ai_providers (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
   provider_type TEXT NOT NULL CHECK (provider_type IN ('openai', 'anthropic', 'google', 'ollama', 'custom')),
@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS public.ai_providers (
 
 -- 4. Table: routing_configs (Routing Algorithm & Timeout Settings)
 CREATE TABLE IF NOT EXISTS public.routing_configs (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE UNIQUE,
   mode TEXT NOT NULL DEFAULT 'priority' CHECK (mode IN ('priority', 'random')),
   failover_enabled BOOLEAN NOT NULL DEFAULT true,
@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS public.routing_configs (
 
 -- 5. Table: gateway_api_keys (OniRoute Gateway Inference Keys)
 CREATE TABLE IF NOT EXISTS public.gateway_api_keys (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
   name TEXT NOT NULL DEFAULT 'Default key',
   key_prefix TEXT NOT NULL,
@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS public.gateway_api_keys (
 
 -- 6. Table: knowledge_bases (Vector RAG Knowledge Collections)
 CREATE TABLE IF NOT EXISTS public.knowledge_bases (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
   source_type TEXT NOT NULL CHECK (source_type IN ('file', 'repo', 'text')),
@@ -81,7 +81,7 @@ CREATE TABLE IF NOT EXISTS public.knowledge_bases (
 
 -- 7. Table: vector_chunks (Embedding Vector Chunks for RAG)
 CREATE TABLE IF NOT EXISTS public.vector_chunks (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
   knowledge_base_id UUID NOT NULL REFERENCES public.knowledge_bases(id) ON DELETE CASCADE,
   content TEXT NOT NULL,
@@ -92,7 +92,7 @@ CREATE TABLE IF NOT EXISTS public.vector_chunks (
 
 -- 8. Table: request_logs (Audit Trail, Token Counts, Latencies)
 CREATE TABLE IF NOT EXISTS public.request_logs (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
   provider_id UUID REFERENCES public.ai_providers(id) ON DELETE SET NULL,
   status TEXT NOT NULL CHECK (status IN ('success', 'error', 'failover')),

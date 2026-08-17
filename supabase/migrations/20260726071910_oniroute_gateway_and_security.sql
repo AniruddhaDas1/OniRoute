@@ -19,7 +19,7 @@ alter table public.knowledge_bases
   add column if not exists embedding_provider_id uuid references public.ai_providers(id) on delete set null;
 
 create table if not exists public.gateway_api_keys (
-  id uuid primary key default uuid_generate_v4(),
+  id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.profiles(id) on delete cascade,
   name text not null default 'Default key',
   key_prefix text not null,
