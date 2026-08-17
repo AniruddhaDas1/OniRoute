@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useState } from 'react';
-import { ArrowDown, ArrowUp, CheckCircle2, Plus, PlugZap, Trash2 } from 'lucide-react';
+import { ArrowDown, ArrowUp, CheckCircle2, AlertCircle, Loader2, Plus, PlugZap, Trash2, X, RefreshCw } from 'lucide-react';
 import { api } from '../lib/api';
 import type { ApiProvider } from '../types';
 
@@ -73,19 +73,27 @@ const emptyForm = {
   api_key: '',
 };
 
+interface ProviderTestState {
+  status: 'idle' | 'testing' | 'connected' | 'failed';
+  latency_ms?: number;
+  error?: string;
+}
+
 export default function ProvidersPage() {
   const [providers, setProviders] = useState<ApiProvider[]>([]);
   const [form, setForm] = useState(emptyForm);
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [testingId, setTestingId] = useState<string | null>(null);
+  const [testStates, setTestStates] = useState<Record<string, ProviderTestState>>({});
+  const [notice, setNotice] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
 
   const load = () =>
     api<ApiProvider[]>('/providers')
       .then((data) => {
         setProviders(data || []);
       })
-      .catch((error) => setNotice(error.message));
+      .catch((error) => setNotice({ type: 'error', message: error.message }));
 
   useEffect(() => {
     void load();
@@ -129,9 +137,15 @@ export default function ProvidersPage() {
       setForm(emptyForm);
       setOpen(false);
       await load();
-      setNotice(`Saved provider “${saved?.name || form.name}”. Key is securely stored in encrypted vault.`);
+      setNotice({
+        type: 'success',
+        message: `Saved provider “${saved?.name || form.name}”. Key is securely stored in encrypted vault.`,
+      });
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Could not save provider.');
+      setNotice({
+        type: 'error',
+        message: error instanceof Error ? error.message : 'Could not save provider.',
+      });
     } finally {
       setBusy(false);
     }
@@ -142,26 +156,60 @@ export default function ProvidersPage() {
     try {
       await api(`/providers/${id}`, { method: 'DELETE' });
       await load();
+      setNotice({ type: 'info', message: 'Provider removed.' });
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Could not remove provider.');
+      setNotice({
+        type: 'error',
+        message: error instanceof Error ? error.message : 'Could not remove provider.',
+      });
     }
   }
 
-  async function test(id: string) {
-    setBusy(true);
+  async function test(provider: ApiProvider) {
+    setTestingId(provider.id);
+    setTestStates((prev) => ({
+      ...prev,
+      [provider.id]: { status: 'testing' },
+    }));
+
     try {
-      const result = await api<{ success: boolean; latency_ms: number; error?: string }>(`/test-provider/${id}`, {
-        method: 'POST',
-      });
-      setNotice(
-        result.success
-          ? `Connection succeeded in ${result.latency_ms}ms.`
-          : `Connection failed: ${result.error}`,
+      const result = await api<{ success: boolean; latency_ms: number; error?: string }>(
+        `/test-provider/${provider.id}`,
+        { method: 'POST' },
       );
+
+      if (result.success) {
+        setTestStates((prev) => ({
+          ...prev,
+          [provider.id]: { status: 'connected', latency_ms: result.latency_ms },
+        }));
+        setNotice({
+          type: 'success',
+          message: `✅ “${provider.name}” connected successfully! Latency: ${result.latency_ms}ms`,
+        });
+      } else {
+        const errMsg = result.error || 'Connection failed or model rejected request.';
+        setTestStates((prev) => ({
+          ...prev,
+          [provider.id]: { status: 'failed', error: errMsg },
+        }));
+        setNotice({
+          type: 'error',
+          message: `❌ “${provider.name}” connection failed: ${errMsg}`,
+        });
+      }
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Connection test failed.');
+      const errMsg = error instanceof Error ? error.message : 'Connection test request failed.';
+      setTestStates((prev) => ({
+        ...prev,
+        [provider.id]: { status: 'failed', error: errMsg },
+      }));
+      setNotice({
+        type: 'error',
+        message: `❌ “${provider.name}” connection test failed: ${errMsg}`,
+      });
     } finally {
-      setBusy(false);
+      setTestingId(null);
     }
   }
 
@@ -177,7 +225,10 @@ export default function ProvidersPage() {
         body: JSON.stringify({ provider_ids: next.map((provider) => provider.id) }),
       });
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Could not reorder providers.');
+      setNotice({
+        type: 'error',
+        message: error instanceof Error ? error.message : 'Could not reorder providers.',
+      });
       load();
     }
   }
@@ -199,10 +250,33 @@ export default function ProvidersPage() {
         </button>
       </div>
 
+      {/* Prominent Notification Banner */}
       {notice && (
-        <p className="rounded-lg border border-violet-100 bg-violet-50 px-4 py-3 text-sm text-violet-900">{notice}</p>
+        <div
+          className={`flex items-center justify-between gap-3 rounded-xl border p-4 text-sm shadow-sm animate-in fade-in slide-in-from-top-2 duration-150 ${
+            notice.type === 'success'
+              ? 'border-emerald-200 bg-emerald-50 text-emerald-950'
+              : notice.type === 'error'
+              ? 'border-rose-200 bg-rose-50 text-rose-950'
+              : 'border-violet-200 bg-violet-50 text-violet-950'
+          }`}
+        >
+          <div className="flex items-center gap-2.5">
+            {notice.type === 'success' && <CheckCircle2 className="h-5 w-5 text-emerald-600 shrink-0" />}
+            {notice.type === 'error' && <AlertCircle className="h-5 w-5 text-rose-600 shrink-0" />}
+            {notice.type === 'info' && <RefreshCw className="h-5 w-5 text-violet-600 shrink-0" />}
+            <span className="font-medium">{notice.message}</span>
+          </div>
+          <button
+            onClick={() => setNotice(null)}
+            className="rounded-lg p-1 text-gray-400 hover:bg-black/5 hover:text-gray-700 transition-colors"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
       )}
 
+      {/* Add Provider Form */}
       {open && (
         <form onSubmit={submit} className="grid gap-4 rounded-xl border border-gray-200 bg-white p-6 shadow-sm md:grid-cols-2 animate-in fade-in zoom-in-95 duration-150">
           <div className="md:col-span-2 flex flex-wrap items-center justify-between gap-2 border-b border-gray-100 pb-4">
@@ -361,6 +435,7 @@ export default function ProvidersPage() {
         </form>
       )}
 
+      {/* Providers List with Dedicated Status Indicator on Each Line */}
       <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
         {!providers.length ? (
           <div className="p-12 text-center">
@@ -369,54 +444,126 @@ export default function ProvidersPage() {
             <p className="mt-1 text-sm text-gray-500">Add your first provider to begin routing requests with automatic failover.</p>
           </div>
         ) : (
-          providers.map((provider, index) => (
-            <div
-              key={provider.id}
-              className="flex flex-wrap items-center gap-4 border-b border-gray-100 p-4 last:border-0 hover:bg-gray-50/50 transition-colors"
-            >
-              <span className="w-6 text-center text-sm font-semibold text-gray-400">{index + 1}</span>
-              <div className="min-w-0 flex-1">
-                <p className="font-medium text-gray-900">
-                  {provider.name}{' '}
-                  {!provider.is_active && <span className="ml-2 text-xs font-normal text-red-600">disabled</span>}
-                </p>
-                <p className="truncate text-xs text-gray-500">
-                  {provider.provider_type} · {provider.model_name} · {provider.base_url}
-                  {provider.endpoint}
-                </p>
+          providers.map((provider, index) => {
+            const testState = testStates[provider.id] || { status: 'idle' };
+            const isCurrentlyTesting = testingId === provider.id;
+
+            return (
+              <div
+                key={provider.id}
+                className="border-b border-gray-100 p-4 last:border-0 hover:bg-gray-50/50 transition-colors space-y-2"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-4">
+                  <div className="flex items-center gap-3 min-w-0 flex-1">
+                    <span className="w-6 text-center text-sm font-semibold text-gray-400 shrink-0">{index + 1}</span>
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2.5">
+                        <p className="font-semibold text-gray-900">{provider.name}</p>
+
+                        {/* Dedicated Connection Status Badge */}
+                        {testState.status === 'connected' && (
+                          <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-semibold text-emerald-700 border border-emerald-200 shadow-2xs">
+                            <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                            Connected {testState.latency_ms ? `(${testState.latency_ms}ms)` : ''}
+                          </span>
+                        )}
+
+                        {testState.status === 'failed' && (
+                          <span className="inline-flex items-center gap-1.5 rounded-full bg-rose-50 px-2.5 py-0.5 text-xs font-semibold text-rose-700 border border-rose-200 shadow-2xs">
+                            <span className="h-2 w-2 rounded-full bg-rose-500"></span>
+                            Not Connected
+                          </span>
+                        )}
+
+                        {testState.status === 'testing' && (
+                          <span className="inline-flex items-center gap-1.5 rounded-full bg-violet-50 px-2.5 py-0.5 text-xs font-semibold text-violet-700 border border-violet-200 shadow-2xs">
+                            <Loader2 className="h-3 w-3 animate-spin text-violet-600" />
+                            Testing Connection...
+                          </span>
+                        )}
+
+                        {testState.status === 'idle' && (
+                          <span className="inline-flex items-center gap-1.5 rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium text-gray-600 border border-gray-200">
+                            <span className="h-2 w-2 rounded-full bg-gray-400"></span>
+                            Not Tested
+                          </span>
+                        )}
+
+                        {!provider.is_active && (
+                          <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-500 font-normal">
+                            Disabled
+                          </span>
+                        )}
+                      </div>
+
+                      <p className="truncate text-xs text-gray-500 mt-1 font-mono">
+                        <span className="font-sans font-medium uppercase text-[11px] text-gray-600 mr-1.5">[{provider.provider_type}]</span>
+                        {provider.model_name} · {provider.base_url}{provider.endpoint}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Actions Row */}
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      aria-label="Move up"
+                      onClick={() => move(index, -1)}
+                      className="rounded-lg p-2 hover:bg-gray-100 text-gray-500 transition-colors"
+                      title="Increase priority"
+                    >
+                      <ArrowUp className="h-4 w-4" />
+                    </button>
+                    <button
+                      aria-label="Move down"
+                      onClick={() => move(index, 1)}
+                      className="rounded-lg p-2 hover:bg-gray-100 text-gray-500 transition-colors"
+                      title="Decrease priority"
+                    >
+                      <ArrowDown className="h-4 w-4" />
+                    </button>
+
+                    <button
+                      onClick={() => test(provider)}
+                      disabled={isCurrentlyTesting}
+                      className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors shadow-2xs ${
+                        testState.status === 'connected'
+                          ? 'bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100'
+                          : testState.status === 'failed'
+                          ? 'bg-rose-50 text-rose-700 border border-rose-200 hover:bg-rose-100'
+                          : 'bg-violet-50 text-violet-700 border border-violet-200 hover:bg-violet-100'
+                      }`}
+                    >
+                      {isCurrentlyTesting ? (
+                        <>
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" /> Testing…
+                        </>
+                      ) : (
+                        <>
+                          <CheckCircle2 className="h-3.5 w-3.5" /> Test
+                        </>
+                      )}
+                    </button>
+
+                    <button
+                      aria-label="Delete"
+                      onClick={() => remove(provider.id)}
+                      className="rounded-lg p-2 text-rose-500 hover:bg-rose-50 hover:text-rose-700 transition-colors"
+                      title="Delete provider"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Inline Error Message Details (if connection failed) */}
+                {testState.status === 'failed' && testState.error && (
+                  <div className="ml-9 rounded-lg bg-rose-50 border border-rose-100 px-3 py-2 text-xs text-rose-800">
+                    <span className="font-semibold">Reason:</span> {testState.error}
+                  </div>
+                )}
               </div>
-              <div className="flex items-center gap-1">
-                <button
-                  aria-label="Move up"
-                  onClick={() => move(index, -1)}
-                  className="rounded p-2 hover:bg-gray-100 text-gray-500 transition-colors"
-                >
-                  <ArrowUp className="h-4 w-4" />
-                </button>
-                <button
-                  aria-label="Move down"
-                  onClick={() => move(index, 1)}
-                  className="rounded p-2 hover:bg-gray-100 text-gray-500 transition-colors"
-                >
-                  <ArrowDown className="h-4 w-4" />
-                </button>
-                <button
-                  onClick={() => test(provider.id)}
-                  disabled={busy}
-                  className="inline-flex items-center gap-1 rounded px-2.5 py-1.5 text-xs font-medium text-violet-700 hover:bg-violet-50 transition-colors"
-                >
-                  <CheckCircle2 className="h-4 w-4" /> Test
-                </button>
-                <button
-                  aria-label="Delete"
-                  onClick={() => remove(provider.id)}
-                  className="rounded p-2 text-red-500 hover:bg-red-50 transition-colors"
-                >
-                  <Trash2 className="h-4 w-4" />
-                </button>
-              </div>
-            </div>
-          ))
+            );
+          })
         )}
       </div>
     </div>
