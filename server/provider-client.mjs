@@ -187,6 +187,84 @@ export function pruneContextToBudget(systemBlocks, turns, maxContextTokens) {
   return [...systemBlocks.map((content) => ({ role: 'system', content })), ...keptTurns];
 }
 
+function formatMessagesForOllama(messages) {
+  return messages.map((msg) => {
+    if (!msg.tool_calls || !msg.tool_calls.length) {
+      return {
+        role: msg.role === 'tool' ? 'tool' : msg.role,
+        content: msg.content ?? '',
+      };
+    }
+
+    const ollamaToolCalls = msg.tool_calls.map((tc) => {
+      let args = tc.function?.arguments || tc.arguments;
+      if (typeof args === 'string') {
+        try {
+          args = JSON.parse(args);
+        } catch {
+          args = {};
+        }
+      }
+      return {
+        id: tc.id,
+        type: 'function',
+        function: {
+          name: tc.function?.name || tc.name || '',
+          arguments: args || {},
+        },
+      };
+    });
+
+    return {
+      role: msg.role,
+      content: msg.content ?? '',
+      tool_calls: ollamaToolCalls,
+    };
+  });
+}
+
+function formatTurnsForAnthropic(turns) {
+  return turns.map((turn) => {
+    if (turn.role === 'tool') {
+      return {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: turn.tool_call_id || turn.name || 'call_0',
+            content: turn.content ?? '',
+          },
+        ],
+      };
+    }
+    if (turn.role === 'assistant' && turn.tool_calls?.length) {
+      const contentParts = [];
+      if (turn.content) contentParts.push({ type: 'text', text: turn.content });
+      for (const tc of turn.tool_calls) {
+        let input = tc.function?.arguments || tc.arguments;
+        if (typeof input === 'string') {
+          try {
+            input = JSON.parse(input);
+          } catch {
+            input = {};
+          }
+        }
+        contentParts.push({
+          type: 'tool_use',
+          id: tc.id || `call_${randomUUID().replace(/-/g, '').slice(0, 9)}`,
+          name: tc.function?.name || tc.name || '',
+          input: input || {},
+        });
+      }
+      return { role: 'assistant', content: contentParts };
+    }
+    return {
+      role: turn.role,
+      content: turn.content ?? '',
+    };
+  });
+}
+
 export function buildProviderRequest(provider, apiKey, messages, options = {}) {
   validateProviderUrl(provider, false);
   const url = joinUrl(provider.base_url, provider.endpoint);
@@ -205,6 +283,7 @@ export function buildProviderRequest(provider, apiKey, messages, options = {}) {
         }
         return t;
       });
+      const formattedTurns = formatTurnsForAnthropic(turns);
       return {
         url,
         headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
@@ -212,7 +291,7 @@ export function buildProviderRequest(provider, apiKey, messages, options = {}) {
           model: provider.model_name,
           max_tokens: options.maxTokens ?? DEFAULT_MAX_TOKENS,
           system: system || undefined,
-          messages: turns.length ? turns : [{ role: 'user', content: '' }],
+          messages: formattedTurns.length ? formattedTurns : [{ role: 'user', content: '' }],
           temperature: options.temperature,
           top_p: options.topP,
           stop_sequences: options.stop,
@@ -266,6 +345,7 @@ export function buildProviderRequest(provider, apiKey, messages, options = {}) {
     case 'ollama': {
       const headers = { 'Content-Type': 'application/json' };
       if (apiKey && apiKey !== 'ollama') headers.Authorization = `Bearer ${apiKey}`;
+      const ollamaMessages = formatMessagesForOllama(messages);
 
       if (provider.endpoint === '/chat' || provider.endpoint === '/api/chat' || provider.base_url.endsWith('/api')) {
         return {
@@ -273,7 +353,7 @@ export function buildProviderRequest(provider, apiKey, messages, options = {}) {
           headers,
           body: JSON.stringify(defined({
             model: provider.model_name,
-            messages,
+            messages: ollamaMessages,
             stream,
             tools: options.tools,
             options: defined({
@@ -291,7 +371,7 @@ export function buildProviderRequest(provider, apiKey, messages, options = {}) {
         headers,
         body: JSON.stringify(defined({
           model: provider.model_name,
-          messages,
+          messages: ollamaMessages,
           stream,
           max_tokens: options.maxTokens ?? 8192,
           max_completion_tokens: options.max_completion_tokens,
