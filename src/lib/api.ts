@@ -212,7 +212,11 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
     ...options,
     headers: {
       'Content-Type': 'application/json',
-      apikey: import.meta.env.VITE_SUPABASE_ANON_KEY || 'standalone',
+      apikey:
+        import.meta.env.VITE_SUPABASE_ANON_KEY ||
+        import.meta.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
+        import.meta.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+        'standalone',
       ...(authHeader ? { Authorization: authHeader } : {}),
       ...(options.headers ?? {}),
     },
