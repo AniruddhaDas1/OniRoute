@@ -575,14 +575,11 @@ app.get('/routing-config', sessionOnly, async (c) => {
   const service = getServiceClient();
   const { data, error } = await service
     .from('routing_configs')
-    .upsert({ user_id: user.id }, { onConflict: 'user_id', ignoreDuplicates: true })
-    .select()
+    .select('*')
+    .eq('user_id', user.id)
     .maybeSingle();
-  if (error && error.code !== 'PGRST116') return c.json(err(error.message), 500);
-  if (data) return c.json(ok(data));
-  const { data: config, error: readError } = await service.from('routing_configs').select('*').eq('user_id', user.id).maybeSingle();
-  if (readError) return c.json(err(readError.message), 500);
-  return c.json(ok(config ?? { user_id: user.id, ...resolveRouting(null) }));
+  if (error) return c.json(err(error.message), 500);
+  return c.json(ok(data ?? { user_id: user.id, ...resolveRouting(null) }));
 });
 
 app.put('/routing-config', sessionOnly, async (c) => {
