@@ -703,17 +703,19 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
     if (response.ok) {
       const result = (await response.json()) as ApiResult<T>;
       if (!result.error) return result.data as T;
+      throw new Error(result.error);
     }
-  } catch {
-    // If Edge function endpoint is not yet deployed or failed to fetch, use direct Supabase client
+
+    const errRes = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+    throw new Error(errRes.error?.message || errRes.error || `Request failed with status ${response.status}`);
+  } catch (err: any) {
+    if (err.message && !err.message.includes('Failed to fetch') && !err.message.includes('NetworkError')) {
+      throw err;
+    }
+    // Only fall back to direct Supabase client if Edge function network is unreachable
     if (!isStandalone) {
       return await supabaseDirect<T>(path, options);
     }
+    throw err;
   }
-
-  if (!isStandalone) {
-    return await supabaseDirect<T>(path, options);
-  }
-
-  throw new Error('Could not complete request.');
 }
