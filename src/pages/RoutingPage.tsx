@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Loader2, CheckCircle2, Zap, Shuffle, ShieldCheck } from 'lucide-react';
+import { Loader2, CheckCircle2, Zap, Shuffle, ShieldCheck, Database } from 'lucide-react';
 import { api } from '../lib/api';
 import type { RoutingConfig } from '../types';
 
@@ -16,14 +16,20 @@ const defaultRoutingConfig: RoutingConfig = {
 
 export default function RoutingPage() {
   const [config, setConfig] = useState<RoutingConfig>(defaultRoutingConfig);
+  const [savedConfig, setSavedConfig] = useState<RoutingConfig>(defaultRoutingConfig);
   const [notice, setNotice] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [saving, setSaving] = useState(false);
+  const [loadedFromDb, setLoadedFromDb] = useState(false);
 
   useEffect(() => {
     let isMounted = true;
     api<RoutingConfig>('/routing-config')
       .then((data) => {
-        if (isMounted && data) setConfig(data);
+        if (isMounted && data) {
+          setConfig(data);
+          setSavedConfig(data);
+          setLoadedFromDb(true);
+        }
       })
       .catch((error) => {
         if (isMounted) setNotice({ type: 'error', message: error.message });
@@ -32,6 +38,8 @@ export default function RoutingPage() {
       isMounted = false;
     };
   }, []);
+
+  const hasUnsavedChanges = JSON.stringify(config) !== JSON.stringify(savedConfig);
 
   async function save() {
     setSaving(true);
@@ -47,8 +55,11 @@ export default function RoutingPage() {
           refine_prompt: config.refine_prompt || null,
         }),
       });
-      if (next) setConfig(next);
-      setNotice({ type: 'success', message: 'Routing configuration saved successfully.' });
+      if (next) {
+        setConfig(next);
+        setSavedConfig(next);
+      }
+      setNotice({ type: 'success', message: 'Routing configuration saved permanently in your Supabase Database.' });
     } catch (error) {
       setNotice({
         type: 'error',
@@ -63,12 +74,26 @@ export default function RoutingPage() {
 
   return (
     <div className="mx-auto max-w-3xl space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Global Routing Strategy</h1>
+          <h1 className="text-2xl font-bold text-gray-900">Default Routing Strategy</h1>
           <p className="mt-1 text-sm text-gray-500">
-            Control the default upstream model sequence, failover retries, and prompt transformations.
+            Configure global upstream selection, automatic failover retries, and prompt transformations.
           </p>
+        </div>
+
+        {/* Database Status Pill */}
+        <div className="flex items-center gap-2">
+          {loadedFromDb && !hasUnsavedChanges && (
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700 border border-emerald-200 shadow-sm">
+              <Database className="h-3.5 w-3.5 text-emerald-600" /> Synced with Database
+            </span>
+          )}
+          {hasUnsavedChanges && (
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700 border border-amber-200 shadow-sm animate-pulse">
+              ● Unsaved Changes
+            </span>
+          )}
         </div>
       </div>
 
@@ -90,9 +115,14 @@ export default function RoutingPage() {
       <div className="space-y-6 rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
         {/* Selection Strategy */}
         <fieldset>
-          <legend className="text-sm font-semibold text-gray-900">Default Model Selection Strategy</legend>
+          <div className="flex items-center justify-between">
+            <legend className="text-sm font-semibold text-gray-900">Global Selection Strategy</legend>
+            <span className="text-xs text-gray-400 font-mono">
+              Active: <strong className="text-violet-700 uppercase">{c.mode}</strong>
+            </span>
+          </div>
           <p className="text-xs text-gray-500 mt-0.5 mb-3">
-            Determines how requests without a dedicated Provider Group choose an upstream provider.
+            Applied automatically to any API Key that does not have a dedicated Provider Group.
           </p>
           <div className="grid gap-3 sm:grid-cols-2">
             <button
@@ -104,11 +134,18 @@ export default function RoutingPage() {
                   : 'border-gray-200 hover:bg-gray-50 text-gray-700'
               }`}
             >
-              <div className="flex items-center gap-2 text-sm font-bold">
-                <Zap className="h-4 w-4 text-violet-600" /> Priority Ordering
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2 text-sm font-bold">
+                  <Zap className="h-4 w-4 text-violet-600" /> Priority Ordering
+                </div>
+                {c.mode === 'priority' && (
+                  <span className="rounded-full bg-violet-600 p-0.5 text-white">
+                    <CheckCircle2 className="h-3.5 w-3.5" />
+                  </span>
+                )}
               </div>
-              <p className="mt-1.5 text-xs text-gray-500 font-normal">
-                Dispatches to the 1st active provider. Automatically fails over to the next provider on failure.
+              <p className="mt-1.5 text-xs text-gray-500 font-normal leading-relaxed">
+                <strong>Best for Coding &amp; Quality:</strong> Always sends 100% of requests to your #1 Primary model (e.g. OpenAI/Claude). Fails over to #2 only if #1 goes down or times out.
               </p>
             </button>
 
@@ -121,11 +158,18 @@ export default function RoutingPage() {
                   : 'border-gray-200 hover:bg-gray-50 text-gray-700'
               }`}
             >
-              <div className="flex items-center gap-2 text-sm font-bold">
-                <Shuffle className="h-4 w-4 text-violet-600" /> Random Load Balance
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2 text-sm font-bold">
+                  <Shuffle className="h-4 w-4 text-violet-600" /> Random Load Balance
+                </div>
+                {c.mode === 'random' && (
+                  <span className="rounded-full bg-violet-600 p-0.5 text-white">
+                    <CheckCircle2 className="h-3.5 w-3.5" />
+                  </span>
+                )}
               </div>
-              <p className="mt-1.5 text-xs text-gray-500 font-normal">
-                Evenly distributes traffic randomly across all active healthy upstream models.
+              <p className="mt-1.5 text-xs text-gray-500 font-normal leading-relaxed">
+                <strong>Best for Throughput &amp; Rate Limits:</strong> Distributes incoming requests evenly across all active healthy providers to avoid hitting individual provider rate limits.
               </p>
             </button>
           </div>
@@ -200,16 +244,23 @@ export default function RoutingPage() {
           </p>
         </div>
 
-        {/* Save button */}
-        <div className="flex justify-end pt-2">
+        {/* Save button with clear status */}
+        <div className="flex items-center justify-between pt-2 border-t border-gray-100">
+          <span className="text-xs text-gray-400">
+            {hasUnsavedChanges ? '⚠️ Changes not saved yet' : '✅ Configuration is up to date'}
+          </span>
           <button
             type="button"
             onClick={save}
-            disabled={saving}
-            className="inline-flex items-center gap-2 rounded-lg bg-violet-600 px-6 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-violet-700 disabled:opacity-50 transition-colors"
+            disabled={saving || !hasUnsavedChanges}
+            className={`inline-flex items-center gap-2 rounded-lg px-6 py-2.5 text-sm font-semibold text-white shadow-sm transition-all ${
+              hasUnsavedChanges
+                ? 'bg-violet-600 hover:bg-violet-700 shadow-violet-600/30'
+                : 'bg-gray-400 cursor-not-allowed opacity-60'
+            }`}
           >
             {saving && <Loader2 className="h-4 w-4 animate-spin" />}
-            {saving ? 'Saving...' : 'Save Configuration'}
+            {saving ? 'Saving to Database...' : 'Save Configuration'}
           </button>
         </div>
       </div>
