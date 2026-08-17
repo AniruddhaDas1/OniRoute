@@ -98,7 +98,6 @@ async function sendToProvider(provider, apiKey, messages, options, timeoutMs) {
       headers: req.headers,
       body: req.body,
       signal: controller.signal,
-      redirect: 'error',
     });
     const latencyMs = Date.now() - startedAt;
     if (!res.ok) {
@@ -119,7 +118,7 @@ async function sendToProvider(provider, apiKey, messages, options, timeoutMs) {
 async function sendToProviderStream(provider, apiKey, messages, options, timeoutMs) {
   const startedAt = Date.now();
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs || 15000);
+  const timer = setTimeout(() => controller.abort(), Math.min(timeoutMs || 8000, 8000));
   try {
     const req = buildProviderRequest(provider, apiKey, messages, { ...options, stream: true });
     const res = await fetch(req.url, {
@@ -127,7 +126,6 @@ async function sendToProviderStream(provider, apiKey, messages, options, timeout
       headers: req.headers,
       body: req.body,
       signal: controller.signal,
-      redirect: 'error',
     });
     const latencyMs = Date.now() - startedAt;
     if (!res.ok) {
@@ -200,6 +198,18 @@ async function resolveProvidersAndMessages(body, userId, keyRecord) {
   const effectiveRoutingMode = keyOrGroupRoutingMode || config.mode || 'priority';
   if (effectiveRoutingMode === 'random') {
     providers = shuffle(providers);
+  }
+
+  // If client requested a specific model (and not "oniroute"), prioritize that provider
+  if (body.model && body.model.toLowerCase() !== 'oniroute') {
+    const reqModel = body.model.toLowerCase();
+    providers.sort((a, b) => {
+      const matchA = a.model_name.toLowerCase() === reqModel || a.name.toLowerCase() === reqModel;
+      const matchB = b.model_name.toLowerCase() === reqModel || b.name.toLowerCase() === reqModel;
+      if (matchA && !matchB) return -1;
+      if (!matchA && matchB) return 1;
+      return 0;
+    });
   }
 
   if (!providers.length) {
@@ -335,7 +345,7 @@ async function routedChatStream(body, userId = LOCAL_USER_ID, keyRecord = null) 
 
       const stream = new ReadableStream({
         async start(controller) {
-          // Initial assistant role event
+          // Initial assistant role event (OpenAI standard)
           controller.enqueue(
             encoder.encode(
               `data: ${JSON.stringify({
@@ -343,7 +353,7 @@ async function routedChatStream(body, userId = LOCAL_USER_ID, keyRecord = null) 
                 object: 'chat.completion.chunk',
                 created,
                 model,
-                choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }],
+                choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }],
               })}\n\n`,
             ),
           );
@@ -760,6 +770,7 @@ function createErrorSseResponseStandalone(errorMessage, model = 'oniroute') {
 
   const stream = new ReadableStream({
     start(controller) {
+      // Chunk 1: Role assistant
       controller.enqueue(
         encoder.encode(
           `data: ${JSON.stringify({
@@ -767,10 +778,23 @@ function createErrorSseResponseStandalone(errorMessage, model = 'oniroute') {
             object: 'chat.completion.chunk',
             created,
             model,
-            choices: [{ index: 0, delta: { role: 'assistant', content: `⚠️ ${errorMessage}` }, finish_reason: null }],
+            choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }],
           })}\n\n`,
         ),
       );
+      // Chunk 2: Error content
+      controller.enqueue(
+        encoder.encode(
+          `data: ${JSON.stringify({
+            id,
+            object: 'chat.completion.chunk',
+            created,
+            model,
+            choices: [{ index: 0, delta: { content: `⚠️ OniRoute Gateway: ${errorMessage}` }, finish_reason: null }],
+          })}\n\n`,
+        ),
+      );
+      // Chunk 3: Single finish reason stop
       controller.enqueue(
         encoder.encode(
           `data: ${JSON.stringify({
@@ -782,6 +806,7 @@ function createErrorSseResponseStandalone(errorMessage, model = 'oniroute') {
           })}\n\n`,
         ),
       );
+      // Chunk 4: Standard SSE completion delimiter
       controller.enqueue(encoder.encode('data: [DONE]\n\n'));
       controller.close();
     },
