@@ -1047,11 +1047,12 @@ const handleChatCompletions = async (c: Context<Env>) => {
   const body = await c.req.json().catch(() => ({}));
   const user = c.get('user');
 
-  if (body.stream) {
-    const stream = new ReadableStream({
-      async start(controller) {
-        try {
-          const result = await routedChat(user, { ...body, stream: false });
+  try {
+    const result = await routedChat(user, { ...body, stream: false });
+
+    if (body.stream) {
+      const stream = new ReadableStream({
+        start(controller) {
           const id = `chatcmpl_${crypto.randomUUID()}`;
           const created = Math.floor(Date.now() / 1000);
           const model = result.model || 'oniroute';
@@ -1101,30 +1102,19 @@ const handleChatCompletions = async (c: Context<Env>) => {
           );
           controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
           controller.close();
-        } catch (error) {
-          const errMsg = messageOf(error);
-          controller.enqueue(
-            new TextEncoder().encode(
-              `data: ${JSON.stringify({ error: { message: errMsg, type: 'routing_error' } })}\n\n`
-            )
-          );
-          controller.close();
-        }
-      },
-    });
+        },
+      });
 
-    return new Response(stream, {
-      headers: {
-        'Content-Type': 'text/event-stream; charset=utf-8',
-        'Cache-Control': 'no-cache, no-transform',
-        'Connection': 'keep-alive',
-        'access-control-allow-origin': '*',
-      },
-    });
-  }
+      return new Response(stream, {
+        headers: {
+          'Content-Type': 'text/event-stream; charset=utf-8',
+          'Cache-Control': 'no-cache, no-transform',
+          'Connection': 'keep-alive',
+          'access-control-allow-origin': '*',
+        },
+      });
+    }
 
-  try {
-    const result = await routedChat(user, body);
     return c.json({
       id: `chatcmpl_${crypto.randomUUID()}`,
       object: 'chat.completion',
