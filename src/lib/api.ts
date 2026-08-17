@@ -367,6 +367,11 @@ async function supabaseDirect<T>(path: string, options: RequestInit = {}): Promi
   }
 
   if (cleanPath.startsWith('/providers/')) {
+    if (cleanPath.endsWith('/secret')) {
+      const id = cleanPath.replace('/providers/', '').replace('/secret', '');
+      const { data } = await supabase.rpc('get_provider_secret', { p_provider_id: id });
+      return { api_key: data || '', exists: Boolean(data) } as T;
+    }
     const id = cleanPath.replace('/providers/', '');
     if (method === 'PUT') {
       const { data, error } = await supabase

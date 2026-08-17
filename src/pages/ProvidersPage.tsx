@@ -17,6 +17,8 @@ import {
   Layers,
   Shuffle,
   Zap,
+  Copy,
+  Check,
 } from 'lucide-react';
 import { api } from '../lib/api';
 import type { ApiProvider, ProviderGroup } from '../types';
@@ -112,6 +114,9 @@ export default function ProvidersPage() {
   const [open, setOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [showApiKey, setShowApiKey] = useState(false);
+  const [secretLoading, setSecretLoading] = useState(false);
+  const [secretExists, setSecretExists] = useState<boolean | null>(null);
+  const [copiedKey, setCopiedKey] = useState(false);
   const [busy, setBusy] = useState(false);
 
   // Group modal state
@@ -136,11 +141,17 @@ export default function ProvidersPage() {
   function handleOpenAdd() {
     setEditingId(null);
     setForm(emptyForm);
+    setShowApiKey(false);
+    setSecretLoading(false);
+    setSecretExists(null);
     setOpen(true);
   }
 
-  function handleEdit(provider: ApiProvider) {
+  async function handleEdit(provider: ApiProvider) {
     setEditingId(provider.id);
+    setShowApiKey(false);
+    setSecretLoading(true);
+    setSecretExists(null);
     setForm({
       name: provider.name,
       provider_type: provider.provider_type,
@@ -152,6 +163,20 @@ export default function ProvidersPage() {
     });
     setOpen(true);
     window.scrollTo({ top: 0, behavior: 'smooth' });
+
+    try {
+      const res = await api<{ api_key: string; exists: boolean }>(`/providers/${provider.id}/secret`);
+      if (res && res.api_key) {
+        setForm((prev) => ({ ...prev, api_key: res.api_key }));
+        setSecretExists(true);
+      } else {
+        setSecretExists(false);
+      }
+    } catch {
+      setSecretExists(false);
+    } finally {
+      setSecretLoading(false);
+    }
   }
 
   function handleOpenCreateGroup() {
@@ -523,30 +548,66 @@ export default function ProvidersPage() {
             </div>
 
             <div className="sm:col-span-2">
-              <label className="block text-xs font-medium text-gray-700">
-                API Key / Auth Token
+              <div className="flex items-center justify-between">
+                <label className="block text-xs font-medium text-gray-700">
+                  API Key / Auth Token
+                </label>
                 {editingId && (
-                  <span className="ml-2 text-xs text-amber-700 font-normal">
-                    (Leave blank to keep existing encrypted secret)
-                  </span>
+                  <div className="flex items-center gap-2">
+                    {secretLoading ? (
+                      <span className="inline-flex items-center gap-1 text-[11px] text-blue-600 font-medium">
+                        <Loader2 className="h-3 w-3 animate-spin" /> Fetching secret...
+                      </span>
+                    ) : secretExists ? (
+                      <span className="inline-flex items-center gap-1 text-[11px] text-emerald-700 font-medium bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">
+                        <CheckCircle2 className="h-3 w-3" /> Stored in Vault
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 text-[11px] text-amber-700 font-medium bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full">
+                        <AlertCircle className="h-3 w-3" /> Missing from Vault
+                      </span>
+                    )}
+                  </div>
                 )}
-              </label>
+              </div>
               <div className="relative mt-1">
                 <input
                   type={showApiKey ? 'text' : 'password'}
-                  className={`${input} pr-10`}
-                  placeholder={editingId ? '••••••••••••••••••••••••' : 'sk-... or your auth token'}
+                  className={`${input} pr-20 font-mono`}
+                  placeholder={editingId && secretExists ? 'Stored in Vault' : 'sk-... or your auth token'}
                   value={form.api_key}
                   onChange={(e) => setForm({ ...form, api_key: e.target.value })}
                 />
-                <button
-                  type="button"
-                  onClick={() => setShowApiKey(!showApiKey)}
-                  className="absolute inset-y-0 right-0 flex items-center pr-3 text-gray-400 hover:text-gray-600"
-                >
-                  {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                </button>
+                <div className="absolute inset-y-0 right-0 flex items-center pr-2 gap-1">
+                  {form.api_key && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard.writeText(form.api_key);
+                        setCopiedKey(true);
+                        setTimeout(() => setCopiedKey(false), 2000);
+                      }}
+                      title="Copy API key"
+                      className="p-1 text-gray-400 hover:text-violet-600 rounded transition-colors"
+                    >
+                      {copiedKey ? <Check className="h-4 w-4 text-emerald-600" /> : <Copy className="h-4 w-4" />}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setShowApiKey(!showApiKey)}
+                    title={showApiKey ? 'Hide key' : 'Show key'}
+                    className="p-1 text-gray-400 hover:text-gray-600 rounded transition-colors"
+                  >
+                    {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </button>
+                </div>
               </div>
+              {editingId && !secretExists && !secretLoading && (
+                <p className="mt-1 text-xs text-red-600">
+                  ⚠️ No encrypted secret was found in the database for this provider. Please paste your API key and click <strong>Save Provider</strong>.
+                </p>
+              )}
             </div>
 
             <div className="flex justify-end gap-3 sm:col-span-2 pt-2">

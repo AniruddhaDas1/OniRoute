@@ -264,6 +264,12 @@ app.delete('/providers/:id', (c) => {
   const deleted = db.deleteProvider(c.req.param('id'));
   return c.json(ok({ deleted }));
 });
+app.get('/providers/:id/secret', (c) => {
+  const provider = db.getProviderById(c.req.param('id'));
+  if (!provider) return c.json(err('Not found'), 404);
+  const secret = db.getProviderSecret(provider.id);
+  return c.json(ok({ api_key: secret || '', exists: Boolean(secret) }));
+});
 app.post('/test-provider/:id', async (c) => {
   const provider = db.getProviderById(c.req.param('id'));
   if (!provider) return c.json(err('Not found'), 404);

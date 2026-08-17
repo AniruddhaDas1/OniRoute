@@ -568,6 +568,15 @@ app.delete('/providers/:id', sessionOnly, async (c) => {
   return error ? c.json(err(error.message), 500) : c.json(ok({ deleted: true }));
 });
 
+app.get('/providers/:id/secret', sessionOnly, async (c) => {
+  const user = c.get('user');
+  const id = c.req.param('id');
+  const provider = await ownedProvider(user.id, id);
+  if (!provider) return c.json(err('Provider not found.'), 404);
+  const { data: secret } = await getServiceClient().rpc('get_provider_secret', { p_provider_id: id });
+  return c.json(ok({ api_key: secret || '', exists: Boolean(secret) }));
+});
+
 app.post('/test-provider/:id', sessionOnly, async (c) => {
   const user = c.get('user');
   const provider = await ownedProvider(user.id, c.req.param('id'));
