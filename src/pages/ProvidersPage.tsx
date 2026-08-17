@@ -12,6 +12,8 @@ import {
   RefreshCw,
   Pencil,
   Info,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 import { api } from '../lib/api';
 import type { ApiProvider } from '../types';
@@ -97,6 +99,7 @@ export default function ProvidersPage() {
   const [form, setForm] = useState(emptyForm);
   const [open, setOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [showApiKey, setShowApiKey] = useState(false);
   const [busy, setBusy] = useState(false);
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testStates, setTestStates] = useState<Record<string, ProviderTestState>>({});
@@ -468,18 +471,30 @@ export default function ProvidersPage() {
             </div>
           </div>
 
-          <label className="md:col-span-2 text-sm font-medium">
-            API Key {editingId && <span className="font-normal text-gray-400">(leave blank to keep current key)</span>}
-            <input
-              required={!editingId}
-              type="password"
-              autoComplete="new-password"
-              className={input}
-              value={form.api_key}
-              onChange={(e) => setForm({ ...form, api_key: e.target.value })}
-              placeholder={editingId ? '•••••••••••••••• (leave blank to keep)' : 'Enter provider API key'}
-            />
-          </label>
+          <div className="md:col-span-2 space-y-1.5">
+            <label className="block text-sm font-medium text-gray-800">
+              API Key {editingId && <span className="font-normal text-gray-500">(leave blank to keep current key)</span>}
+            </label>
+            <div className="relative">
+              <input
+                required={!editingId}
+                type={showApiKey ? 'text' : 'password'}
+                autoComplete="new-password"
+                className={`${input} pr-10 font-mono text-xs`}
+                value={form.api_key}
+                onChange={(e) => setForm({ ...form, api_key: e.target.value })}
+                placeholder={editingId ? '•••••••••••••••• (leave blank to keep current key)' : 'Enter provider API key'}
+              />
+              <button
+                type="button"
+                onClick={() => setShowApiKey(!showApiKey)}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700 transition-colors"
+                title={showApiKey ? 'Hide API Key' : 'View API Key'}
+              >
+                {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              </button>
+            </div>
+          </div>
 
           <div className="md:col-span-2 flex justify-end gap-3 pt-3 border-t border-gray-100">
             <button
