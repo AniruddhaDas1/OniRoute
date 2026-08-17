@@ -69,11 +69,21 @@ function createGatewayKey(): string {
 }
 
 async function authenticate(request: Request): Promise<Caller | null> {
-  const authHeader = request.headers.get('Authorization') ?? '';
-  const keyHeader = request.headers.get('x-oniroute-key');
+  const authHeader =
+    request.headers.get('Authorization') ??
+    request.headers.get('authorization') ??
+    '';
+  const keyHeader =
+    request.headers.get('x-oniroute-key') ??
+    request.headers.get('x-api-key') ??
+    request.headers.get('api-key') ??
+    request.headers.get('X-API-KEY');
+
   const service = getServiceClient();
 
-  if (authHeader.startsWith('Bearer ') && !keyHeader && !authHeader.slice(7).startsWith('or_')) {
+  // If Supabase session JWT (starts with eyJ...)
+  const token = authHeader.replace(/^Bearer\s+/i, '').trim();
+  if (token.startsWith('eyJ') && !keyHeader) {
     const user = await getAuthUser(authHeader);
     if (!user) return null;
 
@@ -91,14 +101,15 @@ async function authenticate(request: Request): Promise<Caller | null> {
     return {
       ...user,
       role: isSuperAdmin ? 'super_admin' : (profile?.role ?? 'member'),
-      isActive: profile ? profile.is_active : true,
-      accessGranted: profile ? profile.access_granted : true,
+      isActive: profile ? profile.is_active !== false : true,
+      accessGranted: profile ? profile.access_granted !== false : true,
       isSuperAdmin,
     };
   }
 
-  const key = (keyHeader ?? authHeader.replace(/^Bearer\s+/i, '')).trim();
-  if (!key.startsWith('or_')) return null;
+  // Otherwise treat as Gateway API Key (e.g. or_... or custom)
+  const key = (keyHeader ?? token).trim();
+  if (!key) return null;
 
   const keyHash = await sha256(key);
   const { data } = await service
@@ -107,6 +118,7 @@ async function authenticate(request: Request): Promise<Caller | null> {
     .eq('key_hash', keyHash)
     .is('revoked_at', null)
     .maybeSingle();
+
   if (!data) return null;
 
   const { data: profile } = await service
@@ -134,8 +146,8 @@ async function authenticate(request: Request): Promise<Caller | null> {
     gatewayMode: data.gateway_mode,
     selectedProviderIds: data.selected_provider_ids,
     role: isSuperAdmin ? 'super_admin' : (profile?.role ?? 'member'),
-    isActive: profile ? profile.is_active : true,
-    accessGranted: profile ? profile.access_granted : true,
+    isActive: profile ? profile.is_active !== false : true,
+    accessGranted: profile ? profile.access_granted !== false : true,
     isSuperAdmin,
   };
 }
