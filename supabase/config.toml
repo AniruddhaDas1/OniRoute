@@ -1,5 +1,4 @@
-[project]
-id = "skbbzlwzsarmideehvmz"
+project_id = "skbbzlwzsarmideehvmz"
 
 [api]
 enabled = true
@@ -27,13 +26,7 @@ enable_signup = true
 enable_confirmations = false
 
 [functions.api]
-# The gateway accepts either a Supabase user JWT (dashboard) or an OniRoute
-# API key (external apps). Both are validated by the function itself.
 verify_jwt = false
 
 [functions.embed-knowledge]
-# Invoked function-to-function by `api`, which presents the service-role key.
-# The worker checks that itself (`isTrustedInternalCaller`), because the
-# platform's JWT check would also accept any signed-in user's token and let
-# them drive ingestion directly.
 verify_jwt = false
