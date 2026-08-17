@@ -251,6 +251,16 @@ export function buildProviderRequest(
   switch (provider.provider_type) {
     case 'anthropic': {
       const { system, turns } = splitSystem(messages);
+      const anthropicTools = options.tools?.map((t: any) => {
+        if (t.type === 'function' && t.function) {
+          return {
+            name: t.function.name,
+            description: t.function.description || undefined,
+            input_schema: t.function.parameters || { type: 'object', properties: {} },
+          };
+        }
+        return t;
+      });
       return {
         url,
         headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
@@ -263,6 +273,7 @@ export function buildProviderRequest(
           top_p: options.topP,
           stop_sequences: options.stop,
           stream,
+          tools: anthropicTools,
         })),
       };
     }
@@ -278,6 +289,16 @@ export function buildProviderRequest(
           googleUrl = `${googleUrl}&alt=sse`;
         }
       }
+      const googleTools = options.tools?.length
+        ? [{
+            functionDeclarations: options.tools.map((t: any) =>
+              t.type === 'function' && t.function
+                ? { name: t.function.name, description: t.function.description, parameters: t.function.parameters }
+                : t,
+            ),
+          }]
+        : undefined;
+
       return {
         url: googleUrl,
         headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
@@ -287,8 +308,9 @@ export function buildProviderRequest(
             parts: [{ text: message.content }],
           })),
           systemInstruction: system ? { parts: [{ text: system }] } : undefined,
+          tools: googleTools,
           generationConfig: defined({
-            maxOutputTokens: options.maxTokens,
+            maxOutputTokens: options.maxTokens ?? 8192,
             temperature: options.temperature,
             topP: options.topP,
             stopSequences: options.stop,
@@ -309,10 +331,11 @@ export function buildProviderRequest(
             model: provider.model_name,
             messages,
             stream,
+            tools: options.tools,
             options: defined({
               temperature: options.temperature,
               top_p: options.topP,
-              num_predict: options.maxTokens,
+              num_predict: options.maxTokens ?? 8192,
               stop: options.stop,
             }),
           })),
@@ -326,10 +349,14 @@ export function buildProviderRequest(
           model: provider.model_name,
           messages,
           stream,
-          max_tokens: options.maxTokens,
+          max_tokens: options.maxTokens ?? 8192,
+          max_completion_tokens: options.max_completion_tokens,
           temperature: options.temperature,
           top_p: options.topP,
           stop: options.stop,
+          tools: options.tools,
+          tool_choice: options.tool_choice,
+          response_format: options.response_format,
         })),
       };
     }

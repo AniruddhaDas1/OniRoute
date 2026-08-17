@@ -343,10 +343,11 @@ async function routedChatStream(body, userId = LOCAL_USER_ID, keyRecord = null) 
       const startedAt = Date.now();
       let buffer = '';
       let hasEmittedFinish = false;
+      let hasSeenToolCalls = false;
 
       const stream = new ReadableStream({
         async start(controller) {
-          // Initial assistant role event (OpenAI standard)
+          // Standard OpenAI Initial Role Chunk (delta contains role only)
           controller.enqueue(
             encoder.encode(
               `data: ${JSON.stringify({
@@ -372,6 +373,10 @@ async function routedChatStream(body, userId = LOCAL_USER_ID, keyRecord = null) 
                 const delta = parseProviderStreamLine(provider, line);
                 if (!delta) continue;
 
+                if (delta.toolCalls && delta.toolCalls.length > 0) {
+                  hasSeenToolCalls = true;
+                }
+
                 const deltaPayload = {};
                 if (delta.role) deltaPayload.role = delta.role;
                 if (delta.text !== undefined && delta.text !== '') deltaPayload.content = delta.text;
@@ -393,6 +398,7 @@ async function routedChatStream(body, userId = LOCAL_USER_ID, keyRecord = null) 
 
                 if ((delta.done || delta.finishReason) && !hasEmittedFinish) {
                   hasEmittedFinish = true;
+                  const finalFinish = delta.finishReason || (hasSeenToolCalls ? 'tool_calls' : 'stop');
                   controller.enqueue(
                     encoder.encode(
                       `data: ${JSON.stringify({
@@ -400,7 +406,7 @@ async function routedChatStream(body, userId = LOCAL_USER_ID, keyRecord = null) 
                         object: 'chat.completion.chunk',
                         created,
                         model,
-                        choices: [{ index: 0, delta: {}, finish_reason: delta.finishReason || 'stop' }],
+                        choices: [{ index: 0, delta: {}, finish_reason: finalFinish }],
                       })}\n\n`,
                     ),
                   );
@@ -411,6 +417,10 @@ async function routedChatStream(body, userId = LOCAL_USER_ID, keyRecord = null) 
             if (buffer.trim()) {
               const delta = parseProviderStreamLine(provider, buffer);
               if (delta) {
+                if (delta.toolCalls && delta.toolCalls.length > 0) {
+                  hasSeenToolCalls = true;
+                }
+
                 const deltaPayload = {};
                 if (delta.role) deltaPayload.role = delta.role;
                 if (delta.text !== undefined && delta.text !== '') deltaPayload.content = delta.text;
@@ -441,7 +451,7 @@ async function routedChatStream(body, userId = LOCAL_USER_ID, keyRecord = null) 
                     object: 'chat.completion.chunk',
                     created,
                     model,
-                    choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+                    choices: [{ index: 0, delta: {}, finish_reason: hasSeenToolCalls ? 'tool_calls' : 'stop' }],
                   })}\n\n`,
                 ),
               );

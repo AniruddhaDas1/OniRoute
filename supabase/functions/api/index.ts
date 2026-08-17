@@ -691,6 +691,7 @@ async function routedChatStream(user: Caller, body: ChatBody): Promise<Response>
       let buffer = '';
 
       let hasEmittedFinish = false;
+      let hasSeenToolCalls = false;
 
       const stream = new ReadableStream({
         async start(controller) {
@@ -720,6 +721,10 @@ async function routedChatStream(user: Caller, body: ChatBody): Promise<Response>
                 const delta = parseProviderStreamLine(provider, line);
                 if (!delta) continue;
 
+                if (delta.toolCalls && delta.toolCalls.length > 0) {
+                  hasSeenToolCalls = true;
+                }
+
                 const deltaPayload: Record<string, any> = {};
                 if (delta.role) deltaPayload.role = delta.role;
                 if (delta.text !== undefined && delta.text !== '') deltaPayload.content = delta.text;
@@ -741,6 +746,7 @@ async function routedChatStream(user: Caller, body: ChatBody): Promise<Response>
 
                 if ((delta.done || delta.finishReason) && !hasEmittedFinish) {
                   hasEmittedFinish = true;
+                  const finalFinish = delta.finishReason || (hasSeenToolCalls ? 'tool_calls' : 'stop');
                   controller.enqueue(
                     encoder.encode(
                       `data: ${JSON.stringify({
@@ -748,7 +754,7 @@ async function routedChatStream(user: Caller, body: ChatBody): Promise<Response>
                         object: 'chat.completion.chunk',
                         created,
                         model,
-                        choices: [{ index: 0, delta: {}, finish_reason: delta.finishReason || 'stop' }],
+                        choices: [{ index: 0, delta: {}, finish_reason: finalFinish }],
                       })}\n\n`,
                     ),
                   );
@@ -759,6 +765,10 @@ async function routedChatStream(user: Caller, body: ChatBody): Promise<Response>
             if (buffer.trim()) {
               const delta = parseProviderStreamLine(provider, buffer);
               if (delta) {
+                if (delta.toolCalls && delta.toolCalls.length > 0) {
+                  hasSeenToolCalls = true;
+                }
+
                 const deltaPayload: Record<string, any> = {};
                 if (delta.role) deltaPayload.role = delta.role;
                 if (delta.text !== undefined && delta.text !== '') deltaPayload.content = delta.text;
@@ -789,7 +799,7 @@ async function routedChatStream(user: Caller, body: ChatBody): Promise<Response>
                     object: 'chat.completion.chunk',
                     created,
                     model,
-                    choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+                    choices: [{ index: 0, delta: {}, finish_reason: hasSeenToolCalls ? 'tool_calls' : 'stop' }],
                   })}\n\n`,
                 ),
               );
