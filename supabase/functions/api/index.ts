@@ -140,7 +140,17 @@ async function authenticate(request: Request): Promise<Caller | null> {
   };
 }
 
+app.get('/', (c) => c.json({ status: 'ok', server: 'oniroute', service: 'ai-gateway' }));
+app.get('/v1', (c) => c.json({ status: 'ok', server: 'oniroute', service: 'ai-gateway' }));
+app.get('/health', (c) => c.json({ status: 'ok', server: 'oniroute' }));
+app.get('/v1/health', (c) => c.json({ status: 'ok', server: 'oniroute' }));
+
 app.use('*', async (c, next) => {
+  const p = c.req.path.replace(/\/+$/, '') || '/';
+  if (p === '/' || p === '/v1' || p === '/health' || p === '/v1/health' || p.endsWith('/health') || p.endsWith('/api') || p.endsWith('/api/v1')) {
+    return next();
+  }
+
   const user = await authenticate(c.req.raw);
   if (!user) return c.json(err('Unauthorized. Use a Supabase session or an OniRoute API key.'), 401);
   if (user.isActive === false || user.accessGranted === false) {
@@ -1040,4 +1050,10 @@ app.post('/v1/chat/completions', handleChatCompletions);
 app.post('/chat/completions', handleChatCompletions);
 app.post('/v1/v1/chat/completions', handleChatCompletions);
 
-Deno.serve(app.fetch);
+const root = new Hono<Env>();
+root.use('*', cors({ origin: allowedOrigins(), allowMethods: ALLOWED_METHODS, allowHeaders: ALLOWED_HEADERS }));
+root.route('/functions/v1/api', app);
+root.route('/api', app);
+root.route('/', app);
+
+Deno.serve(root.fetch);
