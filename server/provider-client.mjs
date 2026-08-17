@@ -160,28 +160,66 @@ function defined(record) {
   return Object.fromEntries(Object.entries(record).filter(([, value]) => value !== undefined));
 }
 
+function getTurnSize(turn) {
+  let len = (turn.content || '').length;
+  if (turn.tool_calls) {
+    len += JSON.stringify(turn.tool_calls).length;
+  }
+  return len;
+}
+
+function truncateString(str, maxLen) {
+  if (!str || str.length <= maxLen) return str;
+  const half = Math.floor((maxLen - 60) / 2);
+  return str.slice(0, half) + '\n\n[... content truncated to fit model context window ...]\n\n' + str.slice(str.length - half);
+}
+
 export function pruneContextToBudget(systemBlocks, turns, maxContextTokens) {
-  if (!maxContextTokens || maxContextTokens <= 0 || !turns.length) {
-    return [...systemBlocks.map((content) => ({ role: 'system', content })), ...turns];
+  if (!turns.length) {
+    return systemBlocks.map((content) => ({ role: 'system', content }));
   }
 
-  const CHARS_PER_TOKEN = 3.8;
-  const maxChars = maxContextTokens * CHARS_PER_TOKEN;
-  let currentChars = systemBlocks.reduce((sum, s) => sum + s.length, 0);
+  // Safety ceiling: Ollama/vLLM max context is 262,144 chars; set safe 240,000 max
+  const hardMaxChars = 240_000;
+  const tokenBasedChars = maxContextTokens && maxContextTokens > 0 ? maxContextTokens * 3.5 : hardMaxChars;
+  const maxChars = Math.min(tokenBasedChars, hardMaxChars);
+
+  let systemChars = systemBlocks.reduce((sum, s) => sum + s.length, 0);
+  let remainingBudget = maxChars - systemChars;
+
+  if (remainingBudget < 4000) {
+    systemBlocks = systemBlocks.map((s) => truncateString(s, 20000));
+    systemChars = systemBlocks.reduce((sum, s) => sum + s.length, 0);
+    remainingBudget = maxChars - systemChars;
+  }
 
   const keptTurns = [];
-  const lastTurn = turns[turns.length - 1];
+  const lastTurn = { ...turns[turns.length - 1] };
+  let lastTurnSize = getTurnSize(lastTurn);
+
+  if (lastTurnSize > remainingBudget) {
+    if (lastTurn.content) {
+      lastTurn.content = truncateString(lastTurn.content, remainingBudget - 1000);
+    }
+    lastTurnSize = getTurnSize(lastTurn);
+  }
+
   keptTurns.unshift(lastTurn);
-  currentChars += (lastTurn.content || '').length;
+  let currentChars = systemChars + lastTurnSize;
 
   for (let i = turns.length - 2; i >= 0; i--) {
-    const turn = turns[i];
-    const turnLen = (turn.content || '').length;
+    const turn = { ...turns[i] };
+    const turnLen = getTurnSize(turn);
     if (currentChars + turnLen > maxChars) {
       break;
     }
     keptTurns.unshift(turn);
     currentChars += turnLen;
+  }
+
+  // Ensure leading orphaned tool turns are discarded
+  while (keptTurns.length && keptTurns[0].role === 'tool') {
+    keptTurns.shift();
   }
 
   return [...systemBlocks.map((content) => ({ role: 'system', content })), ...keptTurns];
