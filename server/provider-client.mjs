@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 export const EMBEDDING_DIMENSIONS = 1536;
 const DEFAULT_MAX_TOKENS = 4096;
 
@@ -335,44 +337,90 @@ function usageFrom(prompt, completion) {
   return { prompt_tokens: safePrompt, completion_tokens: safeCompletion, total_tokens: safePrompt + safeCompletion };
 }
 
+export function normalizeToolCalls(rawToolCalls) {
+  if (!Array.isArray(rawToolCalls)) return [];
+  return rawToolCalls.map((tc, idx) => ({
+    index: typeof tc.index === 'number' ? tc.index : idx,
+    id: tc.id || `call_${randomUUID().replace(/-/g, '').slice(0, 9)}`,
+    type: 'function',
+    function: {
+      name: tc.function?.name || tc.name || '',
+      arguments: typeof tc.function?.arguments === 'string'
+        ? tc.function.arguments
+        : typeof tc.arguments === 'string'
+        ? tc.arguments
+        : JSON.stringify(tc.function?.arguments || tc.arguments || {}),
+    },
+  }));
+}
+
 export function parseProviderResponse(provider, responseBody) {
   switch (provider.provider_type) {
-    case 'anthropic':
+    case 'anthropic': {
+      const toolBlocks = (responseBody.content ?? []).filter((block) => block?.type === 'tool_use');
+      const textBlocks = (responseBody.content ?? []).filter((block) => block?.type === 'text');
+      const toolCalls = toolBlocks.length
+        ? normalizeToolCalls(
+            toolBlocks.map((b) => ({
+              id: b.id,
+              name: b.name,
+              arguments: b.input,
+            })),
+          )
+        : undefined;
+
       return {
-        content: (responseBody.content ?? [])
-          .filter((block) => block?.type === 'text')
-          .map((block) => block.text ?? '')
-          .join(''),
+        content: textBlocks.map((block) => block.text ?? '').join(''),
+        tool_calls: toolCalls,
         model: responseBody.model || provider.model_name,
-        finishReason: responseBody.stop_reason === 'max_tokens' ? 'length' : 'stop',
+        finishReason: toolCalls?.length ? 'tool_calls' : (responseBody.stop_reason === 'max_tokens' ? 'length' : 'stop'),
         usage: usageFrom(responseBody.usage?.input_tokens, responseBody.usage?.output_tokens),
       };
+    }
 
     case 'google': {
       const candidate = responseBody.candidates?.[0];
+      const parts = candidate?.content?.parts ?? [];
+      const textParts = parts.filter((p) => p.text !== undefined);
+      const funcParts = parts.filter((p) => p.functionCall !== undefined);
+      const toolCalls = funcParts.length
+        ? normalizeToolCalls(
+            funcParts.map((p) => ({
+              name: p.functionCall.name,
+              arguments: p.functionCall.args,
+            })),
+          )
+        : undefined;
+
       return {
-        content: (candidate?.content?.parts ?? []).map((part) => part.text ?? '').join(''),
+        content: textParts.map((part) => part.text ?? '').join(''),
+        tool_calls: toolCalls,
         model: responseBody.modelVersion || provider.model_name,
-        finishReason: candidate?.finishReason === 'MAX_TOKENS' ? 'length' : 'stop',
+        finishReason: toolCalls?.length ? 'tool_calls' : (candidate?.finishReason === 'MAX_TOKENS' ? 'length' : 'stop'),
         usage: usageFrom(responseBody.usageMetadata?.promptTokenCount, responseBody.usageMetadata?.candidatesTokenCount),
       };
     }
 
     case 'ollama': {
-      if (responseBody.message?.content !== undefined) {
+      if (responseBody.message?.content !== undefined || responseBody.message?.tool_calls !== undefined) {
+        const rawToolCalls = responseBody.message?.tool_calls;
+        const normalizedTools = rawToolCalls?.length ? normalizeToolCalls(rawToolCalls) : undefined;
         return {
           content: responseBody.message.content ?? '',
+          tool_calls: normalizedTools,
           model: responseBody.model || provider.model_name,
-          finishReason: responseBody.done_reason || (responseBody.done ? 'stop' : 'length'),
+          finishReason: normalizedTools?.length ? 'tool_calls' : (responseBody.done_reason || (responseBody.done ? 'stop' : 'length')),
           usage: usageFrom(responseBody.prompt_eval_count, responseBody.eval_count),
         };
       }
       const choice = responseBody.choices?.[0];
+      const rawTools = choice?.message?.tool_calls;
+      const normalizedTools = rawTools?.length ? normalizeToolCalls(rawTools) : undefined;
       return {
         content: choice?.message?.content ?? '',
-        tool_calls: choice?.message?.tool_calls,
+        tool_calls: normalizedTools,
         model: responseBody.model || provider.model_name,
-        finishReason: choice?.finish_reason || 'stop',
+        finishReason: normalizedTools?.length ? 'tool_calls' : (choice?.finish_reason || 'stop'),
         usage: usageFrom(responseBody.usage?.prompt_tokens, responseBody.usage?.completion_tokens),
       };
     }
@@ -381,11 +429,13 @@ export function parseProviderResponse(provider, responseBody) {
     case 'custom':
     default: {
       const choice = responseBody.choices?.[0];
+      const rawTools = choice?.message?.tool_calls;
+      const normalizedTools = rawTools?.length ? normalizeToolCalls(rawTools) : undefined;
       return {
         content: choice?.message?.content ?? '',
-        tool_calls: choice?.message?.tool_calls,
+        tool_calls: normalizedTools,
         model: responseBody.model || provider.model_name,
-        finishReason: choice?.finish_reason || 'stop',
+        finishReason: normalizedTools?.length ? 'tool_calls' : (choice?.finish_reason || 'stop'),
         usage: usageFrom(responseBody.usage?.prompt_tokens, responseBody.usage?.completion_tokens),
       };
     }
@@ -403,11 +453,35 @@ export function parseProviderStreamLine(provider, line) {
       if (!dataStr) return null;
       try {
         const json = JSON.parse(dataStr);
+        if (json.type === 'content_block_start' && json.content_block?.type === 'tool_use') {
+          return {
+            toolCalls: [
+              {
+                index: json.index ?? 0,
+                id: json.content_block.id || `call_${randomUUID().replace(/-/g, '').slice(0, 9)}`,
+                type: 'function',
+                function: { name: json.content_block.name, arguments: '' },
+              },
+            ],
+          };
+        }
         if (json.type === 'content_block_delta') {
-          return { text: json.delta?.text ?? '' };
+          if (json.delta?.type === 'text_delta') {
+            return { text: json.delta?.text ?? '' };
+          }
+          if (json.delta?.type === 'input_json_delta') {
+            return {
+              toolCalls: [
+                {
+                  index: json.index ?? 0,
+                  function: { arguments: json.delta.partial_json ?? '' },
+                },
+              ],
+            };
+          }
         }
         if (json.type === 'message_delta') {
-          return { finishReason: json.delta?.stop_reason === 'max_tokens' ? 'length' : 'stop' };
+          return { finishReason: json.delta?.stop_reason === 'tool_use' ? 'tool_calls' : (json.delta?.stop_reason === 'max_tokens' ? 'length' : 'stop') };
         }
         if (json.type === 'message_stop') {
           return { done: true };
@@ -431,9 +505,23 @@ export function parseProviderStreamLine(provider, line) {
           return { text: `\n\n[Google Gemini Error: ${json.error.message || 'Stream error'}]`, finishReason: 'stop', done: true };
         }
         const candidate = json.candidates?.[0];
-        const text = (candidate?.content?.parts ?? []).map((p) => p.text ?? '').join('');
-        const finish = candidate?.finishReason ? (candidate.finishReason === 'MAX_TOKENS' ? 'length' : 'stop') : null;
-        return { text, finishReason: finish };
+        const parts = candidate?.content?.parts ?? [];
+        const textParts = parts.filter((p) => p.text !== undefined);
+        const funcParts = parts.filter((p) => p.functionCall !== undefined);
+        const text = textParts.map((p) => p.text ?? '').join('');
+        const toolCalls = funcParts.length
+          ? normalizeToolCalls(
+              funcParts.map((p) => ({
+                name: p.functionCall.name,
+                arguments: p.functionCall.args,
+              })),
+            )
+          : undefined;
+
+        const finish = candidate?.finishReason
+          ? (toolCalls?.length ? 'tool_calls' : (candidate.finishReason === 'MAX_TOKENS' ? 'length' : 'stop'))
+          : null;
+        return { text: text || (toolCalls ? undefined : ''), toolCalls, finishReason: finish };
       } catch {
         return null;
       }
@@ -447,20 +535,27 @@ export function parseProviderStreamLine(provider, line) {
         if (json.error) {
           return { text: `\n\n[Ollama Error: ${json.error}]`, finishReason: 'stop', done: true };
         }
-        if (json.message?.content !== undefined) {
+        if (json.message?.content !== undefined || json.message?.tool_calls !== undefined) {
+          const rawToolCalls = json.message?.tool_calls;
+          const normalizedTools = rawToolCalls?.length ? normalizeToolCalls(rawToolCalls) : undefined;
+          const finish = json.done ? (normalizedTools?.length ? 'tool_calls' : (json.done_reason || 'stop')) : null;
           return {
-            text: json.message.content ?? '',
-            finishReason: json.done ? (json.done_reason || 'stop') : null,
+            text: json.message.content ?? (normalizedTools ? undefined : ''),
+            toolCalls: normalizedTools,
+            finishReason: finish,
             done: json.done ?? false,
           };
         }
         const choice = json.choices?.[0];
         if (choice) {
+          const rawToolCalls = choice.delta?.tool_calls;
+          const normalizedTools = rawToolCalls?.length ? normalizeToolCalls(rawToolCalls) : undefined;
+          const finish = choice.finish_reason ?? null;
           return {
-            text: choice.delta?.content ?? (choice.delta?.tool_calls ? undefined : ''),
-            toolCalls: choice.delta?.tool_calls,
+            text: choice.delta?.content ?? (normalizedTools ? undefined : ''),
+            toolCalls: normalizedTools,
             role: choice.delta?.role,
-            finishReason: choice.finish_reason ?? null,
+            finishReason: finish,
             done: Boolean(choice.finish_reason),
           };
         }
@@ -483,11 +578,14 @@ export function parseProviderStreamLine(provider, line) {
         }
         const choice = json.choices?.[0];
         if (choice) {
+          const rawToolCalls = choice.delta?.tool_calls;
+          const normalizedTools = rawToolCalls?.length ? normalizeToolCalls(rawToolCalls) : undefined;
+          const finish = choice.finish_reason ?? null;
           return {
-            text: choice.delta?.content ?? (choice.delta?.tool_calls ? undefined : ''),
-            toolCalls: choice.delta?.tool_calls,
+            text: choice.delta?.content ?? (normalizedTools ? undefined : ''),
+            toolCalls: normalizedTools,
             role: choice.delta?.role,
-            finishReason: choice.finish_reason ?? null,
+            finishReason: finish,
             done: Boolean(choice.finish_reason),
           };
         }
