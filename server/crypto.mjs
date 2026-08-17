@@ -1,6 +1,6 @@
 import { createCipheriv, createDecipheriv, randomBytes, createHash } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join } from 'node:path';
 
 const DATA_DIR = join(process.cwd(), 'data');
 const KEY_FILE = join(DATA_DIR, '.secret_key');

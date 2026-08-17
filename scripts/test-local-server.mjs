@@ -35,6 +35,10 @@ async function runTests() {
   assert(encrypted.ciphertext && encrypted.iv && encrypted.tag, 'Secret is encrypted with ciphertext, iv, and tag');
   const decrypted = decryptSecret(encrypted.ciphertext, encrypted.iv, encrypted.tag);
   assert(decrypted === plainSecret, 'Secret is correctly decrypted to original plaintext');
+  const sampleKey = createGatewayKey();
+  assert(sampleKey.startsWith('or_'), 'createGatewayKey produces key with "or_" prefix');
+  const hashed = sha256(sampleKey);
+  assert(hashed.length === 64, 'sha256 produces 64-char hex digest');
   console.log('');
 
   // 3. Vector Cosine Similarity

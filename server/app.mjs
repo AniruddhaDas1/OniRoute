@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
+import { randomUUID } from 'node:crypto';
 import { db, LOCAL_USER_ID } from './db.mjs';
 import { sha256, createGatewayKey } from './crypto.mjs';
 import {
@@ -7,7 +8,6 @@ import {
   normaliseMessages,
   parseProviderResponse,
   embedText,
-  joinUrl,
 } from './provider-client.mjs';
 import { searchVectorChunks } from './vector.mjs';
 import { splitChunks } from './chunking.mjs';
@@ -360,7 +360,7 @@ app.post('/v1/chat/completions', async (c) => {
     const result = await routedChat(body);
 
     return c.json({
-      id: `chatcmpl_${crypto.randomUUID()}`,
+      id: `chatcmpl_${randomUUID()}`,
       object: 'chat.completion',
       created: Math.floor(Date.now() / 1000),
       model: result.model,

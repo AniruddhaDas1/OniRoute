@@ -1,7 +1,6 @@
 export const MAX_REPO_FILES = 80;
 export const MAX_FILE_BYTES = 100_000;
 const FETCH_TIMEOUT_MS = 20_000;
-const RAW_CONCURRENCY = 6;
 
 const SUPPORTED_FILE = /\.(md|mdx|txt|rst|adoc|ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|kt|rb|php|cs|swift|c|h|cpp|hpp|sql|sh|toml|ini|cfg|json|yml|yaml)$/i;
 const OWNER = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
