@@ -1,5 +1,5 @@
 import { useEffect, useState, FormEvent } from 'react';
-import { Copy, KeyRound, Plus, Server, Layers, ShieldCheck, X, Zap, Shuffle, Compass, Sparkles } from 'lucide-react';
+import { Copy, KeyRound, Plus, Server, Layers, ShieldCheck, X, Zap, Shuffle, Compass, Sparkles, Check, Loader2, AlertCircle } from 'lucide-react';
 import { api } from '../lib/api';
 import type { ApiProvider, GatewayKey, ProviderGroup, RequestLog } from '../types';
 
@@ -9,11 +9,13 @@ export default function DashboardPage() {
   const [keys, setKeys] = useState<GatewayKey[]>([]);
   const [logs, setLogs] = useState<RequestLog[]>([]);
   const [newKey, setNewKey] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   // Key creation modal state
   const [showModal, setShowModal] = useState(false);
+  const [modalError, setModalError] = useState<string | null>(null);
   const [keyName, setKeyName] = useState('');
   const [selectedGroupId, setSelectedGroupId] = useState<string>('');
   const [selectedRoutingMode, setSelectedRoutingMode] = useState<'default' | 'priority' | 'random'>('default');
@@ -39,9 +41,24 @@ export default function DashboardPage() {
     return `${Math.round(tokens / 1_000)}K Context`;
   }
 
+  function handleOpenModal() {
+    setModalError(null);
+    setKeyName('');
+    setSelectedGroupId('');
+    setSelectedRoutingMode('default');
+    setSelectedGatewayMode('direct');
+    setContextOption('default');
+    setShowModal(true);
+  }
+
   async function handleCreateKey(e: FormEvent) {
     e.preventDefault();
+    if (!keyName.trim()) {
+      setModalError('Please enter a name for this API key.');
+      return;
+    }
     setBusy(true);
+    setModalError(null);
     try {
       let maxContextTokens: number | null = null;
       if (contextOption === '200k') maxContextTokens = 200_000;
@@ -53,7 +70,7 @@ export default function DashboardPage() {
       const result = await api<GatewayKey & { key: string }>('/gateway-keys', {
         method: 'POST',
         body: JSON.stringify({
-          name: keyName.trim() || `Key ${keys.length + 1}`,
+          name: keyName.trim(),
           provider_group_id: selectedGroupId || null,
           routing_mode: selectedRoutingMode === 'default' ? null : selectedRoutingMode,
           gateway_mode: selectedGatewayMode,
@@ -61,17 +78,17 @@ export default function DashboardPage() {
         }),
       });
 
+      if (!result || !result.key) {
+        throw new Error('The gateway did not return a generated key. Please check your connection.');
+      }
+
       setNewKey(result.key);
+      setCopied(false);
       setShowModal(false);
-      setKeyName('');
-      setSelectedGroupId('');
-      setSelectedRoutingMode('default');
-      setSelectedGatewayMode('direct');
-      setContextOption('default');
       await load();
-      setNotice(`Gateway key “${result.name}” created successfully.`);
+      setNotice(`Gateway key “${result.name}” generated successfully. Copy your secret key above.`);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Could not create API key.');
+      setModalError(error instanceof Error ? error.message : 'Could not create API key.');
     } finally {
       setBusy(false);
     }
@@ -90,11 +107,13 @@ export default function DashboardPage() {
 
   const copy = async (value: string) => {
     await navigator.clipboard.writeText(value);
-    setNotice('Copied to clipboard.');
+    setCopied(true);
+    setTimeout(() => setCopied(false), 3000);
+    setNotice('Copied API key to clipboard.');
   };
 
   const example = `curl http://localhost:1001/v1/chat/completions \\
-  -H "Authorization: Bearer or_your_key" \\
+  -H "Authorization: Bearer ${newKey || 'or_your_generated_key'}" \\
   -H "Content-Type: application/json" \\
   -d '{"messages":[{"role":"user","content":"Hello OniRoute"}]}'`;
 
@@ -109,16 +128,34 @@ export default function DashboardPage() {
 
       {notice && <p className="rounded-lg bg-violet-50 px-4 py-3 text-sm text-violet-900 border border-violet-200">{notice}</p>}
 
+      {/* Generated Key Presentation Banner */}
       {newKey && (
-        <div className="rounded-xl border border-amber-200 bg-amber-50 p-5 shadow-sm">
-          <div className="flex items-center gap-2 text-amber-950 font-semibold">
-            <ShieldCheck className="h-5 w-5 text-amber-700" />
-            <p>Copy your new API key now — it will not be displayed again.</p>
+        <div className="rounded-2xl border-2 border-emerald-500 bg-emerald-50/80 p-6 shadow-md animate-in fade-in zoom-in-95 duration-200">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2.5 text-emerald-950 font-bold text-base">
+              <ShieldCheck className="h-6 w-6 text-emerald-600 flex-shrink-0" />
+              <span>Your New Gateway API Key is Ready!</span>
+            </div>
+            <button
+              onClick={() => setNewKey(null)}
+              className="rounded-lg p-1 text-gray-400 hover:bg-emerald-100 hover:text-gray-700"
+            >
+              <X className="h-5 w-5" />
+            </button>
           </div>
-          <div className="mt-3 flex gap-2">
-            <code className="min-w-0 flex-1 overflow-x-auto rounded bg-white p-3 font-mono text-sm border border-amber-200">{newKey}</code>
-            <button onClick={() => copy(newKey)} className="rounded-lg bg-amber-900 px-4 text-white hover:bg-amber-950 transition-colors">
-              <Copy className="h-4 w-4" />
+          <p className="mt-1 text-xs text-emerald-800">
+            Please copy this key now and store it securely. For security, it will not be displayed in plaintext again.
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <code className="min-w-0 flex-1 overflow-x-auto rounded-xl bg-white p-3.5 font-mono text-sm font-semibold text-gray-900 border border-emerald-300 select-all shadow-inner">
+              {newKey}
+            </code>
+            <button
+              onClick={() => copy(newKey)}
+              className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-700 px-5 py-3 text-sm font-semibold text-white hover:bg-emerald-800 transition-colors shadow-sm"
+            >
+              {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+              {copied ? 'Copied!' : 'Copy Key'}
             </button>
           </div>
         </div>
@@ -173,7 +210,7 @@ export default function DashboardPage() {
             </p>
           </div>
           <button
-            onClick={() => setShowModal(true)}
+            onClick={handleOpenModal}
             className="inline-flex items-center gap-2 rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-700 transition-colors shadow-sm"
           >
             <Plus className="h-4 w-4" /> Generate New Key
@@ -240,7 +277,7 @@ export default function DashboardPage() {
                         {formatContextLabel(key.max_context_tokens)}
                       </span>
                     ) : (
-                      <span className="inline-flex items-center rounded-full bg-slate-50 px-2 py-0.5 text-xs text-slate-500 font-normal">
+                      <span className="inline-flex items-center rounded-full bg-slate-50 px-2.5 py-0.5 text-xs text-slate-500 font-normal">
                         Default Context
                       </span>
                     )}
@@ -282,6 +319,13 @@ export default function DashboardPage() {
                 <X className="h-5 w-5" />
               </button>
             </div>
+
+            {modalError && (
+              <div className="flex items-center gap-2 rounded-lg bg-red-50 p-3 text-xs text-red-800 border border-red-200">
+                <AlertCircle className="h-4 w-4 text-red-600 flex-shrink-0" />
+                <span>{modalError}</span>
+              </div>
+            )}
 
             <form onSubmit={handleCreateKey} className="space-y-4">
               <div>
@@ -539,8 +583,9 @@ export default function DashboardPage() {
                 <button
                   type="submit"
                   disabled={busy}
-                  className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-700 transition-colors disabled:opacity-50"
+                  className="inline-flex items-center gap-2 rounded-lg bg-violet-600 px-5 py-2 text-sm font-medium text-white hover:bg-violet-700 transition-colors disabled:opacity-50 shadow-sm"
                 >
+                  {busy && <Loader2 className="h-4 w-4 animate-spin" />}
                   {busy ? 'Generating…' : 'Generate Key'}
                 </button>
               </div>

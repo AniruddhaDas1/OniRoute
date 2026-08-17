@@ -511,20 +511,26 @@ async function supabaseDirect<T>(path: string, options: RequestInit = {}): Promi
           selected_provider_ids: Array.isArray(body.selected_provider_ids) ? body.selected_provider_ids : null,
           max_context_tokens: body.max_context_tokens ? Number(body.max_context_tokens) : null,
         })
-        .select('id, name, key_prefix, provider_group_id, routing_mode, gateway_mode, selected_provider_ids, max_context_tokens, created_at')
+        .select('*')
         .single();
       if (error) throw new Error(error.message);
       return { ...data, key: keyStr } as T;
     }
-    const { data, error } = await supabase
+
+    const { data: rawKeys, error } = await supabase
       .from('gateway_api_keys')
-      .select('id, name, key_prefix, provider_group_id, routing_mode, gateway_mode, selected_provider_ids, max_context_tokens, created_at, last_used_at, revoked_at, provider_groups(name)')
+      .select('*')
       .is('revoked_at', null)
       .order('created_at', { ascending: false });
     if (error) throw new Error(error.message);
-    const formatted = (data || []).map((k: any) => ({
+
+    // Fetch groups to map names safely without relying on PostgREST join cache
+    const { data: groups } = await supabase.from('provider_groups').select('id, name');
+    const groupNameMap = new Map((groups || []).map((g: any) => [g.id, g.name]));
+
+    const formatted = (rawKeys || []).map((k: any) => ({
       ...k,
-      provider_group_name: k.provider_groups?.name || null,
+      provider_group_name: k.provider_group_id ? groupNameMap.get(k.provider_group_id) || null : null,
     }));
     return formatted as T;
   }
