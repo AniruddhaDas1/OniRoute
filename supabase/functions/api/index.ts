@@ -335,11 +335,6 @@ async function refineUserMessage(
 }
 
 async function routedChat(user: Caller, body: ChatBody) {
-  if (body.stream) {
-    // Better an explicit refusal than silently returning a single JSON body to
-    // a client that is waiting on an SSE stream.
-    throw new RequestError('Streaming is not supported yet. Retry with "stream": false.', 400);
-  }
 
   const mode = (user.gatewayMode && user.gatewayMode !== 'flexible')
     ? (user.gatewayMode as 'direct' | 'refined')
@@ -1039,10 +1034,88 @@ app.get('/v1/models', handleModels);
 app.get('/models', handleModels);
 app.get('/v1/v1/models', handleModels);
 
-// Support both /v1/chat/completions, /chat/completions, and /v1/v1/chat/completions
 const handleChatCompletions = async (c: Context<Env>) => {
+  const body = await c.req.json().catch(() => ({}));
+  const user = c.get('user');
+
+  if (body.stream) {
+    const stream = new ReadableStream({
+      async start(controller) {
+        try {
+          const result = await routedChat(user, { ...body, stream: false });
+          const id = `chatcmpl_${crypto.randomUUID()}`;
+          const created = Math.floor(Date.now() / 1000);
+          const model = result.model || 'oniroute';
+          const content = result.response || '';
+
+          // Initial assistant role chunk
+          controller.enqueue(
+            new TextEncoder().encode(
+              `data: ${JSON.stringify({
+                id,
+                object: 'chat.completion.chunk',
+                created,
+                model,
+                choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }],
+              })}\n\n`
+            )
+          );
+
+          // Stream content chunks (word by word for smooth UI typing)
+          const words = content.split(' ');
+          for (let i = 0; i < words.length; i++) {
+            const chunk = (i === 0 ? '' : ' ') + words[i];
+            controller.enqueue(
+              new TextEncoder().encode(
+                `data: ${JSON.stringify({
+                  id,
+                  object: 'chat.completion.chunk',
+                  created,
+                  model,
+                  choices: [{ index: 0, delta: { content: chunk }, finish_reason: null }],
+                })}\n\n`
+              )
+            );
+          }
+
+          // Final finish chunk
+          controller.enqueue(
+            new TextEncoder().encode(
+              `data: ${JSON.stringify({
+                id,
+                object: 'chat.completion.chunk',
+                created,
+                model,
+                choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+              })}\n\n`
+            )
+          );
+          controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+          controller.close();
+        } catch (error) {
+          const errMsg = messageOf(error);
+          controller.enqueue(
+            new TextEncoder().encode(
+              `data: ${JSON.stringify({ error: { message: errMsg, type: 'routing_error' } })}\n\n`
+            )
+          );
+          controller.close();
+        }
+      },
+    });
+
+    return new Response(stream, {
+      headers: {
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache, no-transform',
+        'Connection': 'keep-alive',
+        'access-control-allow-origin': '*',
+      },
+    });
+  }
+
   try {
-    const result = await routedChat(c.get('user'), await c.req.json());
+    const result = await routedChat(user, body);
     return c.json({
       id: `chatcmpl_${crypto.randomUUID()}`,
       object: 'chat.completion',
