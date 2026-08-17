@@ -10,7 +10,7 @@ export const DEFAULT_ROUTING: RoutingConfig = {
   mode: 'priority',
   failover_enabled: true,
   max_retries: 3,
-  timeout_ms: 10_000,
+  timeout_ms: 60_000,
   refine_prompt: null,
 };
 
@@ -22,7 +22,7 @@ export function resolveRouting(row: Partial<RoutingConfig> | null | undefined): 
     mode,
     failover_enabled: typeof row?.failover_enabled === 'boolean' ? row.failover_enabled : DEFAULT_ROUTING.failover_enabled,
     max_retries: Number.isFinite(maxRetries) ? Math.min(Math.max(maxRetries, 0), 20) : DEFAULT_ROUTING.max_retries,
-    timeout_ms: Number.isFinite(timeoutMs) ? Math.min(Math.max(timeoutMs, 1_000), 120_000) : DEFAULT_ROUTING.timeout_ms,
+    timeout_ms: Number.isFinite(timeoutMs) ? Math.min(Math.max(timeoutMs, 1_000), 300_000) : DEFAULT_ROUTING.timeout_ms,
     refine_prompt: row?.refine_prompt ?? null,
   };
 }
