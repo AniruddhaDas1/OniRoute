@@ -317,6 +317,8 @@ function mockResponse<T>(path: string, options: RequestInit = {}): T | null {
 /** Direct Supabase client operations (guarantees zero "Failed to fetch" errors if Edge Functions are not deployed) */
 async function supabaseDirect<T>(path: string, options: RequestInit = {}): Promise<T> {
   const method = (options.method || 'GET').toUpperCase();
+  const cleanPath = path.split('?')[0];
+  const urlParams = new URLSearchParams(path.includes('?') ? path.split('?')[1] : '');
   const body = options.body ? JSON.parse(options.body as string) : {};
   const { data: { session } } = await supabase.auth.getSession();
   const userId = session?.user?.id;
@@ -336,7 +338,7 @@ async function supabaseDirect<T>(path: string, options: RequestInit = {}): Promi
     );
   }
 
-  if (path === '/providers') {
+  if (cleanPath === '/providers') {
     if (method === 'POST') {
       const { data, error } = await supabase
         .from('ai_providers')
@@ -364,8 +366,8 @@ async function supabaseDirect<T>(path: string, options: RequestInit = {}): Promi
     return (data || []) as T;
   }
 
-  if (path.startsWith('/providers/')) {
-    const id = path.replace('/providers/', '');
+  if (cleanPath.startsWith('/providers/')) {
+    const id = cleanPath.replace('/providers/', '');
     if (method === 'PUT') {
       const { data, error } = await supabase
         .from('ai_providers')
@@ -391,7 +393,7 @@ async function supabaseDirect<T>(path: string, options: RequestInit = {}): Promi
     }
   }
 
-  if (path === '/providers/reorder') {
+  if (cleanPath === '/providers/reorder') {
     const ids = body.provider_ids as string[];
     if (Array.isArray(ids)) {
       await Promise.all(
@@ -403,7 +405,7 @@ async function supabaseDirect<T>(path: string, options: RequestInit = {}): Promi
     return { reordered: ids } as T;
   }
 
-  if (path === '/routing-config') {
+  if (cleanPath === '/routing-config') {
     if (method === 'PUT') {
       const { data, error } = await supabase
         .from('routing_configs')
@@ -441,7 +443,7 @@ async function supabaseDirect<T>(path: string, options: RequestInit = {}): Promi
     }) as T;
   }
 
-  if (path === '/provider-groups') {
+  if (cleanPath === '/provider-groups') {
     if (method === 'POST') {
       const { data, error } = await supabase
         .from('provider_groups')
@@ -465,8 +467,8 @@ async function supabaseDirect<T>(path: string, options: RequestInit = {}): Promi
     return (data || []) as T;
   }
 
-  if (path.startsWith('/provider-groups/')) {
-    const id = path.replace('/provider-groups/', '');
+  if (cleanPath.startsWith('/provider-groups/')) {
+    const id = cleanPath.replace('/provider-groups/', '');
     if (method === 'PUT') {
       const updates: Record<string, any> = { updated_at: new Date().toISOString() };
       if (body.name) updates.name = body.name.trim();
@@ -490,7 +492,7 @@ async function supabaseDirect<T>(path: string, options: RequestInit = {}): Promi
     }
   }
 
-  if (path === '/gateway-keys') {
+  if (cleanPath === '/gateway-keys') {
     if (method === 'POST') {
       const keyStr = `or_${crypto.randomUUID().replace(/-/g, '')}${crypto.randomUUID().replace(/-/g, '')}`;
       const hashBuffer = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(keyStr));
@@ -535,8 +537,8 @@ async function supabaseDirect<T>(path: string, options: RequestInit = {}): Promi
     return formatted as T;
   }
 
-  if (path.startsWith('/gateway-keys/')) {
-    const id = path.replace('/gateway-keys/', '');
+  if (cleanPath.startsWith('/gateway-keys/')) {
+    const id = cleanPath.replace('/gateway-keys/', '');
     if (method === 'DELETE') {
       const { error } = await supabase
         .from('gateway_api_keys')
@@ -547,7 +549,7 @@ async function supabaseDirect<T>(path: string, options: RequestInit = {}): Promi
     }
   }
 
-  if (path === '/knowledge') {
+  if (cleanPath === '/knowledge') {
     const { data, error } = await supabase
       .from('knowledge_bases')
       .select('*')
@@ -556,8 +558,8 @@ async function supabaseDirect<T>(path: string, options: RequestInit = {}): Promi
     return (data || []) as T;
   }
 
-  if (path.startsWith('/knowledge/')) {
-    const id = path.replace('/knowledge/', '');
+  if (cleanPath.startsWith('/knowledge/')) {
+    const id = cleanPath.replace('/knowledge/', '');
     if (method === 'DELETE') {
       const { error } = await supabase.from('knowledge_bases').delete().eq('id', id);
       if (error) throw new Error(error.message);
@@ -565,7 +567,7 @@ async function supabaseDirect<T>(path: string, options: RequestInit = {}): Promi
     }
   }
 
-  if (path === '/admin/members') {
+  if (cleanPath === '/admin/members') {
     const isSuper = userEmail?.toLowerCase() === 'leadspree24x7@gmail.com';
     const { data: profiles, error } = await supabase
       .from('profiles')
@@ -603,8 +605,8 @@ async function supabaseDirect<T>(path: string, options: RequestInit = {}): Promi
     })) as T;
   }
 
-  if (path.startsWith('/admin/members/')) {
-    const id = path.replace('/admin/members/', '');
+  if (cleanPath.startsWith('/admin/members/')) {
+    const id = cleanPath.replace('/admin/members/', '');
     if (method === 'PATCH') {
       const { data, error } = await supabase
         .from('profiles')
@@ -627,8 +629,8 @@ async function supabaseDirect<T>(path: string, options: RequestInit = {}): Promi
     }
   }
 
-  if (path.startsWith('/test-provider/')) {
-    const id = path.replace('/test-provider/', '');
+  if (cleanPath.startsWith('/test-provider/')) {
+    const id = cleanPath.replace('/test-provider/', '');
     const { data: prov } = await supabase.from('ai_providers').select('*').eq('id', id).single();
     if (!prov) throw new Error('Provider not found in Supabase database.');
 
@@ -645,12 +647,13 @@ async function supabaseDirect<T>(path: string, options: RequestInit = {}): Promi
     }
   }
 
-  if (path === '/logs') {
+  if (cleanPath === '/logs') {
+    const limit = Number(urlParams.get('limit') || 50);
     const { data, error } = await supabase
       .from('request_logs')
       .select('*')
       .order('created_at', { ascending: false })
-      .limit(50);
+      .limit(limit);
     if (error) return { logs: [], next_cursor: null } as T;
     return { logs: data || [], next_cursor: null } as T;
   }
