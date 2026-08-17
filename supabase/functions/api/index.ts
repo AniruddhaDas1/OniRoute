@@ -313,7 +313,7 @@ async function sendToProvider(
     // attempt instead of aborting the whole request.
     const apiKey = await readSecret(provider.id);
     const request = buildProviderRequest(provider, apiKey, messages, options);
-    const effectiveTimeout = timeoutMs && timeoutMs > 0 ? Math.max(timeoutMs, 60_000) : 60_000;
+    const effectiveTimeout = timeoutMs && timeoutMs > 0 ? Math.max(timeoutMs, 180_000) : 180_000;
     const response = await fetchWithTimeout(
       request.url,
       { method: 'POST', headers: request.headers, body: request.body },
@@ -343,7 +343,7 @@ async function sendToProviderStream(
   try {
     const apiKey = await readSecret(provider.id);
     const request = buildProviderRequest(provider, apiKey, messages, { ...options, stream: true });
-    const effectiveTimeout = timeoutMs && timeoutMs > 0 ? Math.max(timeoutMs, 60_000) : 60_000;
+    const effectiveTimeout = timeoutMs && timeoutMs > 0 ? Math.max(timeoutMs, 180_000) : 180_000;
     const response = await fetchWithTimeout(
       request.url,
       { method: 'POST', headers: request.headers, body: request.body },

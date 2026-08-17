@@ -90,7 +90,7 @@ export async function authenticateControlPlane(c, next) {
 async function sendToProvider(provider, apiKey, messages, options, timeoutMs) {
   const startedAt = Date.now();
   const controller = new AbortController();
-  const effectiveTimeout = timeoutMs && timeoutMs > 0 ? Math.max(timeoutMs, 60000) : 60000;
+  const effectiveTimeout = timeoutMs && timeoutMs > 0 ? Math.max(timeoutMs, 180000) : 180000;
   const timer = setTimeout(() => controller.abort(), effectiveTimeout);
   try {
     const req = buildProviderRequest(provider, apiKey, messages, options);
@@ -119,7 +119,7 @@ async function sendToProvider(provider, apiKey, messages, options, timeoutMs) {
 async function sendToProviderStream(provider, apiKey, messages, options, timeoutMs) {
   const startedAt = Date.now();
   const controller = new AbortController();
-  const effectiveTimeout = timeoutMs && timeoutMs > 0 ? Math.max(timeoutMs, 60000) : 60000;
+  const effectiveTimeout = timeoutMs && timeoutMs > 0 ? Math.max(timeoutMs, 180000) : 180000;
   const timer = setTimeout(() => controller.abort(), effectiveTimeout);
   try {
     const req = buildProviderRequest(provider, apiKey, messages, { ...options, stream: true });

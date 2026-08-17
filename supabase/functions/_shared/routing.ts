@@ -10,7 +10,7 @@ export const DEFAULT_ROUTING: RoutingConfig = {
   mode: 'priority',
   failover_enabled: true,
   max_retries: 3,
-  timeout_ms: 60_000,
+  timeout_ms: 180_000,
   refine_prompt: null,
 };
 
