@@ -70,7 +70,7 @@ console.log(response.choices[0].message.content);`,
             </div>
             <span className="text-lg font-bold tracking-tight text-white">OniRoute</span>
             <span className="rounded-full bg-violet-500/10 px-2.5 py-0.5 text-xs font-semibold text-violet-400 border border-violet-500/20">
-              v0.1.0 Open Source
+              v1.1.0 Open Source
             </span>
           </div>
 
