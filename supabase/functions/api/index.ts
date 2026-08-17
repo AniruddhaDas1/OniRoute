@@ -152,6 +152,65 @@ async function authenticate(request: Request): Promise<Caller | null> {
   };
 }
 
+function createErrorSseResponse(errorMessage: string, model = 'oniroute'): Response {
+  const id = `chatcmpl_${crypto.randomUUID()}`;
+  const created = Math.floor(Date.now() / 1000);
+  const encoder = new TextEncoder();
+
+  const stream = new ReadableStream({
+    start(controller) {
+      // Chunk 1: Role assistant
+      controller.enqueue(
+        encoder.encode(
+          `data: ${JSON.stringify({
+            id,
+            object: 'chat.completion.chunk',
+            created,
+            model,
+            choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }],
+          })}\n\n`,
+        ),
+      );
+      // Chunk 2: Error content
+      controller.enqueue(
+        encoder.encode(
+          `data: ${JSON.stringify({
+            id,
+            object: 'chat.completion.chunk',
+            created,
+            model,
+            choices: [{ index: 0, delta: { content: `⚠️ OniRoute Gateway: ${errorMessage}` }, finish_reason: null }],
+          })}\n\n`,
+        ),
+      );
+      // Chunk 3: Single finish reason stop
+      controller.enqueue(
+        encoder.encode(
+          `data: ${JSON.stringify({
+            id,
+            object: 'chat.completion.chunk',
+            created,
+            model,
+            choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+          })}\n\n`,
+        ),
+      );
+      // Chunk 4: Standard SSE completion delimiter
+      controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+      controller.close();
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      'Connection': 'keep-alive',
+      'access-control-allow-origin': '*',
+    },
+  });
+}
+
 app.get('/', (c) => c.json({ status: 'ok', server: 'oniroute', service: 'ai-gateway' }));
 app.get('/v1', (c) => c.json({ status: 'ok', server: 'oniroute', service: 'ai-gateway' }));
 app.get('/health', (c) => c.json({ status: 'ok', server: 'oniroute' }));
@@ -164,8 +223,18 @@ app.use('*', async (c, next) => {
   }
 
   const user = await authenticate(c.req.raw);
-  if (!user) return c.json(err('Unauthorized. Use a Supabase session or an OniRoute API key.'), 401);
+  if (!user) {
+    const isStream = c.req.header('Accept')?.includes('text/event-stream') || c.req.header('accept')?.includes('text/event-stream');
+    if (isStream && (p.includes('/chat/completions') || p.includes('/chat'))) {
+      return createErrorSseResponse('Unauthorized. Use a valid OniRoute API key (or_...).');
+    }
+    return c.json(err('Unauthorized. Use a Supabase session or an OniRoute API key.'), 401);
+  }
   if (user.isActive === false || user.accessGranted === false) {
+    const isStream = c.req.header('Accept')?.includes('text/event-stream') || c.req.header('accept')?.includes('text/event-stream');
+    if (isStream && (p.includes('/chat/completions') || p.includes('/chat'))) {
+      return createErrorSseResponse('Your account access has been suspended by the administrator (leadspree24x7@gmail.com).');
+    }
     return c.json(err('Your account access has been suspended by the administrator (leadspree24x7@gmail.com).'), 403);
   }
   c.set('user', user);
@@ -1352,29 +1421,15 @@ app.delete('/admin/members/:id', sessionOnly, superAdminOnly, async (c) => {
 
 app.post('/chat', async (c) => {
   try {
-    return c.json(ok(await routedChat(c.get('user'), await c.req.json())));
+    const body = await c.req.json().catch(() => ({}));
+    const user = c.get('user');
+    if (body.stream) {
+      return await routedChatStream(user, body);
+    }
+    return c.json(ok(await routedChat(user, body)));
   } catch (error) {
     const status = error instanceof RequestError ? error.status : 422;
     return c.json(err(messageOf(error)), status as 400);
-  }
-});
-
-app.post('/v1/chat/completions', async (c) => {
-  try {
-    const result = await routedChat(c.get('user'), await c.req.json());
-    return c.json({
-      id: `chatcmpl_${crypto.randomUUID()}`,
-      object: 'chat.completion',
-      created: Math.floor(Date.now() / 1000),
-      model: result.model,
-      choices: [{ index: 0, message: { role: 'assistant', content: result.response }, finish_reason: result.finish_reason }],
-      // OpenAI clients read `usage` for cost accounting; it was being dropped.
-      usage: result.usage ?? { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
-      oniroute: { provider: result.provider_used, mode: result.mode, latency_ms: result.latency_ms },
-    });
-  } catch (error) {
-    const status = error instanceof RequestError ? error.status : 502;
-    return c.json({ error: { message: messageOf(error), type: 'routing_error' } }, status as 400);
   }
 });
 
@@ -1414,65 +1469,6 @@ const handleModels = async (c: Context<Env>) => {
 app.get('/v1/models', handleModels);
 app.get('/models', handleModels);
 app.get('/v1/v1/models', handleModels);
-
-function createErrorSseResponse(errorMessage: string, model = 'oniroute'): Response {
-  const id = `chatcmpl_${crypto.randomUUID()}`;
-  const created = Math.floor(Date.now() / 1000);
-  const encoder = new TextEncoder();
-
-  const stream = new ReadableStream({
-    start(controller) {
-      // Chunk 1: Role assistant
-      controller.enqueue(
-        encoder.encode(
-          `data: ${JSON.stringify({
-            id,
-            object: 'chat.completion.chunk',
-            created,
-            model,
-            choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }],
-          })}\n\n`,
-        ),
-      );
-      // Chunk 2: Error content
-      controller.enqueue(
-        encoder.encode(
-          `data: ${JSON.stringify({
-            id,
-            object: 'chat.completion.chunk',
-            created,
-            model,
-            choices: [{ index: 0, delta: { content: `⚠️ OniRoute Gateway: ${errorMessage}` }, finish_reason: null }],
-          })}\n\n`,
-        ),
-      );
-      // Chunk 3: Single finish reason stop
-      controller.enqueue(
-        encoder.encode(
-          `data: ${JSON.stringify({
-            id,
-            object: 'chat.completion.chunk',
-            created,
-            model,
-            choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
-          })}\n\n`,
-        ),
-      );
-      // Chunk 4: Standard SSE completion delimiter
-      controller.enqueue(encoder.encode('data: [DONE]\n\n'));
-      controller.close();
-    },
-  });
-
-  return new Response(stream, {
-    headers: {
-      'Content-Type': 'text/event-stream; charset=utf-8',
-      'Cache-Control': 'no-cache, no-transform',
-      'Connection': 'keep-alive',
-      'access-control-allow-origin': '*',
-    },
-  });
-}
 
 const handleChatCompletions = async (c: Context<Env>) => {
   const body = await c.req.json().catch(() => ({}));

@@ -769,6 +769,9 @@ app.post('/chat', async (c) => {
       return c.json(err('Unauthorized. A valid OniRoute gateway API key is required.'), 401);
     }
     const body = await c.req.json();
+    if (body.stream) {
+      return await routedChatStream(body, LOCAL_USER_ID, keyRecord);
+    }
     const result = await routedChat(body, LOCAL_USER_ID, keyRecord);
     return c.json(ok(result));
   } catch (error) {
@@ -838,6 +841,10 @@ function createErrorSseResponseStandalone(errorMessage, model = 'oniroute') {
 const handleChatCompletionsStandalone = async (c) => {
   const keyRecord = authenticateGatewayKey(c);
   if (!keyRecord) {
+    const isStream = c.req.header('Accept')?.includes('text/event-stream') || c.req.header('accept')?.includes('text/event-stream');
+    if (isStream) {
+      return createErrorSseResponseStandalone('Unauthorized. A valid OniRoute gateway API key (or_...) is required.');
+    }
     return c.json(
       { error: { message: 'Unauthorized. A valid OniRoute gateway API key (or_...) is required.', type: 'authentication_error' } },
       401,
