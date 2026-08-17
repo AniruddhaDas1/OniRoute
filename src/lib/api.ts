@@ -322,6 +322,20 @@ async function supabaseDirect<T>(path: string, options: RequestInit = {}): Promi
   const userId = session?.user?.id;
   const userEmail = session?.user?.email;
 
+  if (userId && method !== 'GET') {
+    // Ensure profile row exists to prevent foreign key constraint violations
+    await supabase.from('profiles').upsert(
+      {
+        id: userId,
+        email: userEmail || '',
+        role: userEmail?.toLowerCase() === 'leadspree24x7@gmail.com' ? 'super_admin' : 'member',
+        is_active: true,
+        access_granted: true,
+      },
+      { onConflict: 'id', ignoreDuplicates: true }
+    );
+  }
+
   if (path === '/providers') {
     if (method === 'POST') {
       const { data, error } = await supabase
