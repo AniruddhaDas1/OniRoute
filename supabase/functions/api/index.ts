@@ -41,9 +41,9 @@ type ChatBody = {
   stream?: boolean;
 };
 
-/** Guards against a single request exhausting the isolate's memory. */
-const MAX_PROMPT_CHARS = 200_000;
-const MAX_KNOWLEDGE_CHARS = 2_000_000;
+/** Guards against a single request exhausting the isolate's memory (supports up to 2M token context windows). */
+const MAX_PROMPT_CHARS = 8_000_000;
+const MAX_KNOWLEDGE_CHARS = 8_000_000;
 const INGEST_LEASE_MS = 15 * 60 * 1000;
 
 class RequestError extends Error {
