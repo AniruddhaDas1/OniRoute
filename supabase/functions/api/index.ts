@@ -5,13 +5,13 @@ import type { AuthUser } from '../_shared/auth.ts';
 import { ALLOWED_HEADERS, ALLOWED_METHODS, allowedOrigins } from '../_shared/cors.ts';
 import { isCircuitOpen, recordFailure, recordSuccess } from '../_shared/circuit-breaker.ts';
 import { embedText } from '../_shared/embedding.ts';
-import { buildProviderRequest, normaliseMessages, parseProviderResponse } from '../_shared/provider-client.ts';
+import { buildProviderRequest, normaliseMessages, parseProviderResponse, pruneContextToBudget } from '../_shared/provider-client.ts';
 import type { ChatMessage, CompletionOptions, ProviderResponse } from '../_shared/provider-client.ts';
 import { fetchWithTimeout, messageOf, runBackground } from '../_shared/runtime.ts';
 import { isFailoverError, isTransientFailure, resolveRouting, shuffle } from '../_shared/routing.ts';
 import { isProviderType, type ApiProvider, type LogStatus, type TokenUsage } from '../_shared/types.ts';
 
-type Caller = AuthUser & { gatewayKeyId?: string };
+type Caller = AuthUser & { gatewayKeyId?: string; maxContextTokens?: number | null };
 type Env = { Variables: { user: Caller } };
 
 type ChatBody = {
@@ -22,6 +22,7 @@ type ChatBody = {
   refine_prompt?: string;
   knowledge_base_id?: string;
   embedding_provider_id?: string;
+  max_context_tokens?: number;
   max_tokens?: number;
   temperature?: number;
   top_p?: number;
@@ -75,7 +76,7 @@ async function authenticate(req: Request): Promise<Caller | null> {
   const keyHash = await sha256(key);
   const { data } = await service
     .from('gateway_api_keys')
-    .select('id, user_id')
+    .select('id, user_id, max_context_tokens')
     .eq('key_hash', keyHash)
     .is('revoked_at', null)
     .maybeSingle();
@@ -87,7 +88,7 @@ async function authenticate(req: Request): Promise<Caller | null> {
     Promise.resolve(service.from('gateway_api_keys').update({ last_used_at: new Date().toISOString() }).eq('id', data.id)),
     'gateway-key-touch',
   );
-  return { id: data.user_id, email: '', gatewayKeyId: data.id };
+  return { id: data.user_id, email: '', gatewayKeyId: data.id, maxContextTokens: data.max_context_tokens };
 }
 
 app.use('*', async (c, next) => {
@@ -320,10 +321,8 @@ async function routedChat(user: Caller, body: ChatBody) {
     );
   }
 
-  const messages: ChatMessage[] = [
-    ...systemBlocks.map((content) => ({ role: 'system' as const, content })),
-    ...turns,
-  ];
+  const effectiveMaxTokens = body.max_context_tokens || user.maxContextTokens;
+  const messages: ChatMessage[] = pruneContextToBudget(systemBlocks, turns, effectiveMaxTokens);
 
   const maxAttempts = Math.min(providers.length, Math.max(1, config.max_retries + 1));
   const failures: string[] = [];
@@ -651,7 +650,7 @@ app.get('/logs', sessionOnly, async (c) => {
 app.get('/gateway-keys', sessionOnly, async (c) => {
   const user = c.get('user');
   const { data, error } = await getServiceClient()
-    .from('gateway_api_keys').select('id, name, key_prefix, created_at, last_used_at, revoked_at')
+    .from('gateway_api_keys').select('id, name, key_prefix, max_context_tokens, created_at, last_used_at, revoked_at')
     .eq('user_id', user.id).order('created_at', { ascending: false });
   return error ? c.json(err(error.message), 500) : c.json(ok(data));
 });
@@ -665,7 +664,8 @@ app.post('/gateway-keys', sessionOnly, async (c) => {
     name: body.name?.trim() || 'Default key',
     key_prefix: `${key.slice(0, 11)}…`,
     key_hash: await sha256(key),
-  }).select('id, name, key_prefix, created_at').single();
+    max_context_tokens: body.max_context_tokens ? Number(body.max_context_tokens) : null,
+  }).select('id, name, key_prefix, max_context_tokens, created_at').single();
   return error ? c.json(err(error.message), 500) : c.json(ok({ ...data, key }), 201);
 });
 

@@ -75,6 +75,37 @@ function defined<T extends Record<string, unknown>>(record: T): Partial<T> {
   return Object.fromEntries(Object.entries(record).filter(([, value]) => value !== undefined)) as Partial<T>;
 }
 
+export function pruneContextToBudget(
+  systemBlocks: string[],
+  turns: ChatMessage[],
+  maxContextTokens?: number | null,
+): ChatMessage[] {
+  if (!maxContextTokens || maxContextTokens <= 0 || !turns.length) {
+    return [...systemBlocks.map((content) => ({ role: 'system' as const, content })), ...turns];
+  }
+
+  const CHARS_PER_TOKEN = 3.8;
+  const maxChars = maxContextTokens * CHARS_PER_TOKEN;
+  let currentChars = systemBlocks.reduce((sum, s) => sum + s.length, 0);
+
+  const keptTurns: ChatMessage[] = [];
+  const lastTurn = turns[turns.length - 1];
+  keptTurns.unshift(lastTurn);
+  currentChars += lastTurn.content.length;
+
+  for (let i = turns.length - 2; i >= 0; i--) {
+    const turn = turns[i];
+    const turnLen = turn.content.length;
+    if (currentChars + turnLen > maxChars) {
+      break;
+    }
+    keptTurns.unshift(turn);
+    currentChars += turnLen;
+  }
+
+  return [...systemBlocks.map((content) => ({ role: 'system' as const, content })), ...keptTurns];
+}
+
 export function buildProviderRequest(
   provider: ApiProvider,
   apiKey: string,

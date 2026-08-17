@@ -47,6 +47,33 @@ function defined(record) {
   return Object.fromEntries(Object.entries(record).filter(([, value]) => value !== undefined));
 }
 
+export function pruneContextToBudget(systemBlocks, turns, maxContextTokens) {
+  if (!maxContextTokens || maxContextTokens <= 0 || !turns.length) {
+    return [...systemBlocks.map((content) => ({ role: 'system', content })), ...turns];
+  }
+
+  const CHARS_PER_TOKEN = 3.8;
+  const maxChars = maxContextTokens * CHARS_PER_TOKEN;
+  let currentChars = systemBlocks.reduce((sum, s) => sum + s.length, 0);
+
+  const keptTurns = [];
+  const lastTurn = turns[turns.length - 1];
+  keptTurns.unshift(lastTurn);
+  currentChars += lastTurn.content.length;
+
+  for (let i = turns.length - 2; i >= 0; i--) {
+    const turn = turns[i];
+    const turnLen = turn.content.length;
+    if (currentChars + turnLen > maxChars) {
+      break;
+    }
+    keptTurns.unshift(turn);
+    currentChars += turnLen;
+  }
+
+  return [...systemBlocks.map((content) => ({ role: 'system', content })), ...keptTurns];
+}
+
 export function buildProviderRequest(provider, apiKey, messages, options = {}) {
   const url = joinUrl(provider.base_url, provider.endpoint);
 

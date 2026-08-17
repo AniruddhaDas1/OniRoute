@@ -8,6 +8,7 @@ import {
   normaliseMessages,
   parseProviderResponse,
   embedText,
+  pruneContextToBudget,
 } from './provider-client.mjs';
 import { searchVectorChunks } from './vector.mjs';
 import { splitChunks } from './chunking.mjs';
@@ -93,7 +94,7 @@ async function refineUserMessage(providers, userMessage, refinePrompt, timeoutMs
   return userMessage;
 }
 
-async function routedChat(body, userId = LOCAL_USER_ID) {
+async function routedChat(body, userId = LOCAL_USER_ID, maxContextTokens = null) {
   const mode = body.mode === 'refined' ? 'refined' : 'direct';
   const config = db.getRoutingConfig(userId);
   let providers = db.getProviders(userId).filter((p) => p.is_active);
@@ -154,7 +155,9 @@ async function routedChat(body, userId = LOCAL_USER_ID) {
     }
   }
 
-  const messages = [...systemBlocks.map((content) => ({ role: 'system', content })), ...turns];
+  // Enforce isolated context window budget if configured for this key/request
+  const effectiveMaxTokens = body.max_context_tokens || maxContextTokens;
+  const messages = pruneContextToBudget(systemBlocks, turns, effectiveMaxTokens);
   const maxAttempts = Math.min(providers.length, (config.max_retries ?? 3) + 1);
   const failures = [];
 
@@ -327,7 +330,7 @@ app.post('/gateway-keys', async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const key = createGatewayKey();
   const keyHash = sha256(key);
-  const record = db.createGatewayKey(body.name, `${key.slice(0, 11)}…`, keyHash);
+  const record = db.createGatewayKey(body.name, `${key.slice(0, 11)}…`, keyHash, LOCAL_USER_ID, body.max_context_tokens);
   return c.json(ok({ ...record, key }), 201);
 });
 app.delete('/gateway-keys/:id', (c) => {
@@ -338,7 +341,16 @@ app.delete('/gateway-keys/:id', (c) => {
 // Inference Routes (OpenAI compatible)
 app.post('/chat', async (c) => {
   try {
-    const result = await routedChat(await c.req.json());
+    const authHeader = c.req.header('Authorization') || '';
+    const customKey = c.req.header('x-oniroute-key') || authHeader.replace(/^Bearer\s+/i, '');
+    let keyRecord = null;
+    if (customKey && customKey.startsWith('or_')) {
+      keyRecord = db.getGatewayKeyByHash(sha256(customKey));
+      if (!keyRecord) return c.json(err('Invalid or revoked OniRoute key.'), 401);
+      db.touchGatewayKey(keyRecord.id);
+    }
+    const body = await c.req.json();
+    const result = await routedChat(body, LOCAL_USER_ID, keyRecord?.max_context_tokens);
     return c.json(ok(result));
   } catch (error) {
     return c.json(err(error.message), 400);
@@ -349,15 +361,16 @@ app.post('/v1/chat/completions', async (c) => {
   try {
     const authHeader = c.req.header('Authorization') || '';
     const customKey = c.req.header('x-oniroute-key') || authHeader.replace(/^Bearer\s+/i, '');
+    let keyRecord = null;
 
     if (customKey && customKey.startsWith('or_')) {
-      const keyRecord = db.getGatewayKeyByHash(sha256(customKey));
+      keyRecord = db.getGatewayKeyByHash(sha256(customKey));
       if (!keyRecord) return c.json({ error: { message: 'Invalid or revoked OniRoute key.' } }, 401);
       db.touchGatewayKey(keyRecord.id);
     }
 
     const body = await c.req.json();
-    const result = await routedChat(body);
+    const result = await routedChat(body, LOCAL_USER_ID, keyRecord?.max_context_tokens);
 
     return c.json({
       id: `chatcmpl_${randomUUID()}`,

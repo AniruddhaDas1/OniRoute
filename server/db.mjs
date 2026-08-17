@@ -140,13 +140,14 @@ export const db = {
     return state.gateway_keys.find((k) => k.key_hash === keyHash && !k.revoked_at) ?? null;
   },
 
-  createGatewayKey(name, keyPrefix, keyHash, userId = LOCAL_USER_ID) {
+  createGatewayKey(name, keyPrefix, keyHash, userId = LOCAL_USER_ID, maxContextTokens = null) {
     const key = {
       id: randomUUID(),
       user_id: userId,
       name: name || 'Default key',
       key_prefix: keyPrefix,
       key_hash: keyHash,
+      max_context_tokens: maxContextTokens ? Number(maxContextTokens) : null,
       last_used_at: null,
       revoked_at: null,
       created_at: new Date().toISOString(),

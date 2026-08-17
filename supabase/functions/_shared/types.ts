@@ -71,3 +71,16 @@ export interface TokenUsage {
   completion_tokens: number;
   total_tokens: number;
 }
+
+export interface GatewayKey {
+  id: string;
+  user_id: string;
+  name: string;
+  key_prefix: string;
+  key_hash: string;
+  max_context_tokens?: number | null;
+  created_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+}
+
