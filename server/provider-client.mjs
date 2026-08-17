@@ -6,7 +6,30 @@ export function joinUrl(baseUrl, endpoint) {
   return `${baseUrl.replace(/\/$/, '')}/${endpoint.replace(/^\//, '')}`;
 }
 
-export function validateProviderUrl(provider) {
+function isAllowedDomain(hostname, allowedDomains) {
+  const h = hostname.toLowerCase();
+  return allowedDomains.some((domain) => h === domain || h.endsWith(`.${domain}`));
+}
+
+function isPrivateOrLoopbackHost(hostname) {
+  const h = hostname.toLowerCase();
+  if (h === 'localhost' || h === '127.0.0.1' || h === '0.0.0.0' || h === '::1' || h.endsWith('.local')) {
+    return true;
+  }
+  // Cloud metadata endpoint
+  if (h === '169.254.169.254' || h.startsWith('169.254.')) {
+    return true;
+  }
+  // RFC1918 IPv4 ranges
+  if (/^10\./.test(h)) return true;
+  if (/^192\.168\./.test(h)) return true;
+  if (/^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(h)) return true;
+  // IPv6 link-local
+  if (/^fe80:/i.test(h)) return true;
+  return false;
+}
+
+export function validateProviderUrl(provider, isCloudMode = false) {
   const fullUrl = joinUrl(provider.base_url, provider.endpoint);
   let parsed;
   try {
@@ -25,31 +48,40 @@ export function validateProviderUrl(provider) {
 
   const hostname = parsed.hostname.toLowerCase();
 
+  if (isCloudMode && isPrivateOrLoopbackHost(hostname)) {
+    throw new Error(`Access to private network or metadata destinations (${hostname}) is forbidden in Cloud mode.`);
+  }
+
   switch (provider.provider_type) {
     case 'openai':
-      if (!hostname.endsWith('openai.com') && !hostname.endsWith('azure.com')) {
+      if (!isAllowedDomain(hostname, ['openai.com', 'azure.com', 'openai.azure.com'])) {
         throw new Error(`Invalid OpenAI endpoint domain: "${hostname}". Expected api.openai.com or *.openai.azure.com.`);
       }
       break;
 
     case 'anthropic':
-      if (!hostname.endsWith('anthropic.com')) {
+      if (!isAllowedDomain(hostname, ['anthropic.com'])) {
         throw new Error(`Invalid Anthropic endpoint domain: "${hostname}". Expected api.anthropic.com.`);
       }
       break;
 
     case 'google':
-      if (!hostname.endsWith('googleapis.com')) {
+      if (!isAllowedDomain(hostname, ['googleapis.com'])) {
         throw new Error(`Invalid Google Gemini endpoint domain: "${hostname}". Expected generativelanguage.googleapis.com.`);
       }
       break;
 
     case 'ollama': {
-      const isLoopback = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '0.0.0.0' || hostname.endsWith('.local');
-      const isCloud = hostname.endsWith('ollama.com') || hostname.endsWith('ollama.ai');
-      const isPrivateSubnet = /^10\.|^192\.168\.|^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(hostname);
-      if (!isLoopback && !isCloud && !isPrivateSubnet && parsed.protocol !== 'https:') {
-        throw new Error(`Invalid Ollama endpoint host: "${hostname}". Expected localhost, ollama.com, or private network.`);
+      const isLoopback = isPrivateOrLoopbackHost(hostname);
+      const isOfficialCloud = isAllowedDomain(hostname, ['ollama.com', 'ollama.ai']);
+      if (isCloudMode) {
+        if (!isOfficialCloud) {
+          throw new Error(`In Cloud mode, Ollama endpoints must use official cloud domains (ollama.com). Got: "${hostname}".`);
+        }
+      } else {
+        if (!isLoopback && !isOfficialCloud && parsed.protocol !== 'https:') {
+          throw new Error(`Invalid Ollama endpoint host: "${hostname}". Expected localhost, ollama.com, or private network.`);
+        }
       }
       break;
     }
@@ -154,7 +186,7 @@ export function pruneContextToBudget(systemBlocks, turns, maxContextTokens) {
 }
 
 export function buildProviderRequest(provider, apiKey, messages, options = {}) {
-  validateProviderUrl(provider);
+  validateProviderUrl(provider, false);
   const url = joinUrl(provider.base_url, provider.endpoint);
   const stream = Boolean(options.stream);
 
@@ -327,8 +359,98 @@ export function parseProviderResponse(provider, responseBody) {
   }
 }
 
+export function parseProviderStreamLine(provider, line) {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.startsWith(':')) return null;
+
+  switch (provider.provider_type) {
+    case 'anthropic': {
+      if (!trimmed.startsWith('data:')) return null;
+      const dataStr = trimmed.slice(5).trim();
+      if (!dataStr) return null;
+      try {
+        const json = JSON.parse(dataStr);
+        if (json.type === 'content_block_delta') {
+          return { text: json.delta?.text ?? '' };
+        }
+        if (json.type === 'message_delta') {
+          return { finishReason: json.delta?.stop_reason === 'max_tokens' ? 'length' : 'stop' };
+        }
+        if (json.type === 'message_stop') {
+          return { done: true };
+        }
+      } catch {
+        return null;
+      }
+      return null;
+    }
+
+    case 'google': {
+      if (!trimmed.startsWith('data:')) return null;
+      const dataStr = trimmed.slice(5).trim();
+      if (!dataStr) return null;
+      try {
+        const json = JSON.parse(dataStr);
+        const candidate = json.candidates?.[0];
+        const text = (candidate?.content?.parts ?? []).map((p) => p.text ?? '').join('');
+        const finish = candidate?.finishReason ? (candidate.finishReason === 'MAX_TOKENS' ? 'length' : 'stop') : null;
+        return { text, finishReason: finish };
+      } catch {
+        return null;
+      }
+    }
+
+    case 'ollama': {
+      const dataStr = trimmed.startsWith('data:') ? trimmed.slice(5).trim() : trimmed;
+      if (dataStr === '[DONE]') return { done: true };
+      try {
+        const json = JSON.parse(dataStr);
+        if (json.message?.content !== undefined) {
+          return {
+            text: json.message.content ?? '',
+            finishReason: json.done ? (json.done_reason || 'stop') : null,
+            done: json.done ?? false,
+          };
+        }
+        const choice = json.choices?.[0];
+        if (choice) {
+          return {
+            text: choice.delta?.content ?? '',
+            finishReason: choice.finish_reason ?? null,
+            done: Boolean(choice.finish_reason),
+          };
+        }
+      } catch {
+        return null;
+      }
+      return null;
+    }
+
+    case 'openai':
+    case 'custom':
+    default: {
+      if (!trimmed.startsWith('data:')) return null;
+      const dataStr = trimmed.slice(5).trim();
+      if (dataStr === '[DONE]') return { done: true };
+      try {
+        const json = JSON.parse(dataStr);
+        const choice = json.choices?.[0];
+        if (choice) {
+          return {
+            text: choice.delta?.content ?? '',
+            finishReason: choice.finish_reason ?? null,
+          };
+        }
+      } catch {
+        return null;
+      }
+      return null;
+    }
+  }
+}
+
 export async function embedText(provider, apiKey, text) {
-  validateProviderUrl(provider);
+  validateProviderUrl(provider, false);
   const model = provider.embedding_model_name || 'text-embedding-3-small';
   const url = joinUrl(provider.base_url, '/embeddings');
 
@@ -337,6 +459,7 @@ export async function embedText(provider, apiKey, text) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
       body: JSON.stringify({ model, prompt: text }),
+      redirect: 'error',
     });
     if (!res.ok) throw new Error(`Embedding failed with HTTP ${res.status}`);
     const json = await res.json();
@@ -347,6 +470,7 @@ export async function embedText(provider, apiKey, text) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
     body: JSON.stringify({ model, input: text }),
+    redirect: 'error',
   });
   if (!res.ok) throw new Error(`Embedding failed with HTTP ${res.status}`);
   const json = await res.json();

@@ -4,8 +4,8 @@ import { getAuthUser, getServiceClient } from '../_shared/auth.ts';
 import type { AuthUser } from '../_shared/auth.ts';
 import { ALLOWED_HEADERS, ALLOWED_METHODS, allowedOrigins } from '../_shared/cors.ts';
 import { embedText } from '../_shared/embedding.ts';
-import { buildProviderRequest, normaliseMessages, parseProviderResponse, pruneContextToBudget, validateProviderUrl } from '../_shared/provider-client.ts';
-import type { ChatMessage, CompletionOptions, ProviderResponse } from '../_shared/provider-client.ts';
+import { buildProviderRequest, normaliseMessages, parseProviderResponse, parseProviderStreamLine, pruneContextToBudget, validateProviderUrl } from '../_shared/provider-client.ts';
+import type { ChatMessage, CompletionOptions, ProviderResponse, StreamDelta } from '../_shared/provider-client.ts';
 import { fetchWithTimeout, messageOf, runBackground } from '../_shared/runtime.ts';
 import { isFailoverError, isTransientFailure, resolveRouting, shuffle } from '../_shared/routing.ts';
 import { isProviderType, type ApiProvider, type LogStatus, type TokenUsage } from '../_shared/types.ts';
@@ -258,6 +258,38 @@ async function sendToProvider(
   }
 }
 
+type StreamAttempt =
+  | { ok: true; latencyMs: number; response: Response; provider: ApiProvider }
+  | { ok: false; latencyMs: number; status: number; error: string };
+
+async function sendToProviderStream(
+  provider: ApiProvider,
+  messages: ChatMessage[],
+  options: CompletionOptions,
+  timeoutMs: number,
+): Promise<StreamAttempt> {
+  const startedAt = Date.now();
+  try {
+    const apiKey = await readSecret(provider.id);
+    const request = buildProviderRequest(provider, apiKey, messages, { ...options, stream: true });
+    const response = await fetchWithTimeout(
+      request.url,
+      { method: 'POST', headers: request.headers, body: request.body, redirect: 'error' },
+      timeoutMs,
+    );
+    const latencyMs = Date.now() - startedAt;
+    if (!response.ok) {
+      return { ok: false, latencyMs, status: response.status, error: (await response.text()).slice(0, 600) };
+    }
+    if (!response.body) {
+      return { ok: false, latencyMs, status: 502, error: 'Provider returned no response stream.' };
+    }
+    return { ok: true, latencyMs, response, provider };
+  } catch (error) {
+    return { ok: false, latencyMs: Date.now() - startedAt, status: 503, error: messageOf(error) };
+  }
+}
+
 /**
  * Turn a request body into a conversation, preserving roles.
  *
@@ -478,6 +510,214 @@ async function routedChat(user: Caller, body: ChatBody) {
     if (!config.failover_enabled || !isFailoverError(result.status)) break;
   }
   throw new RequestError(`All selected providers failed. ${failures.join(' | ')}`);
+}
+
+async function routedChatStream(user: Caller, body: ChatBody): Promise<Response> {
+  const mode = user.gatewayMode && user.gatewayMode !== 'flexible'
+    ? user.gatewayMode
+    : (body.mode === 'refined' ? 'refined' : 'direct');
+  const { systemBlocks, turns } = readConversation(body);
+  const options = readOptions(body);
+  const client = getServiceClient();
+
+  const { data: configRow } = await client.from('routing_configs').select('*').eq('user_id', user.id).maybeSingle();
+  const config = resolveRouting(configRow);
+
+  let candidateProviderIds: string[] | null = null;
+  let keyOrGroupRoutingMode: 'priority' | 'random' | null = user.routingMode ?? null;
+
+  if (user.providerGroupId) {
+    const { data: group } = await client
+      .from('provider_groups')
+      .select('id, name, routing_mode, provider_ids')
+      .eq('id', user.providerGroupId)
+      .eq('user_id', user.id)
+      .maybeSingle();
+
+    if (group) {
+      candidateProviderIds = group.provider_ids || [];
+      if (!keyOrGroupRoutingMode) {
+        keyOrGroupRoutingMode = group.routing_mode;
+      }
+    }
+  } else if (Array.isArray(user.selectedProviderIds) && user.selectedProviderIds.length) {
+    candidateProviderIds = user.selectedProviderIds;
+  }
+
+  const { data: allProviders } = await client
+    .from('ai_providers')
+    .select('*')
+    .eq('user_id', user.id)
+    .eq('is_active', true)
+    .order('priority');
+
+  let providers = (allProviders ?? []) as ApiProvider[];
+
+  if (candidateProviderIds && candidateProviderIds.length) {
+    const idToProvider = new Map(providers.map((p) => [p.id, p]));
+    providers = candidateProviderIds
+      .map((id) => idToProvider.get(id))
+      .filter((p): p is ApiProvider => Boolean(p && p.is_active));
+  }
+
+  const effectiveRoutingMode = keyOrGroupRoutingMode || config.mode || 'priority';
+  if (effectiveRoutingMode === 'random') providers = shuffle(providers);
+  providers = providers.filter((provider) => !isCircuitOpen(provider.id));
+
+  if (!providers.length) {
+    throw new RequestError(
+      user.providerGroupId
+        ? 'No active providers available in the assigned Provider Group.'
+        : 'No active provider is available. Add a provider or wait for the circuit breaker to recover.',
+      503,
+    );
+  }
+
+  const effectiveMaxTokens = body.max_context_tokens || user.maxContextTokens;
+  const messages: ChatMessage[] = pruneContextToBudget(systemBlocks, turns, effectiveMaxTokens);
+
+  const maxAttempts = Math.min(providers.length, Math.max(1, config.max_retries + 1));
+  const failures: string[] = [];
+
+  for (const provider of providers.slice(0, maxAttempts)) {
+    const result = await sendToProviderStream(provider, messages, options, config.timeout_ms);
+    if (result.ok) {
+      const reader = result.response.body!.getReader();
+      const decoder = new TextDecoder();
+      const encoder = new TextEncoder();
+      const id = `chatcmpl_${crypto.randomUUID()}`;
+      const created = Math.floor(Date.now() / 1000);
+      const model = provider.model_name || 'oniroute';
+      const startedAt = Date.now();
+      let buffer = '';
+
+      const stream = new ReadableStream({
+        async start(controller) {
+          controller.enqueue(
+            encoder.encode(
+              `data: ${JSON.stringify({
+                id,
+                object: 'chat.completion.chunk',
+                created,
+                model,
+                choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }],
+              })}\n\n`,
+            ),
+          );
+
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+
+              buffer += decoder.decode(value, { stream: true });
+              const lines = buffer.split('\n');
+              buffer = lines.pop() ?? '';
+
+              for (const line of lines) {
+                const delta = parseProviderStreamLine(provider, line);
+                if (!delta) continue;
+
+                if (delta.text) {
+                  controller.enqueue(
+                    encoder.encode(
+                      `data: ${JSON.stringify({
+                        id,
+                        object: 'chat.completion.chunk',
+                        created,
+                        model,
+                        choices: [{ index: 0, delta: { content: delta.text }, finish_reason: null }],
+                      })}\n\n`,
+                    ),
+                  );
+                }
+
+                if (delta.done || delta.finishReason) {
+                  controller.enqueue(
+                    encoder.encode(
+                      `data: ${JSON.stringify({
+                        id,
+                        object: 'chat.completion.chunk',
+                        created,
+                        model,
+                        choices: [{ index: 0, delta: {}, finish_reason: delta.finishReason || 'stop' }],
+                      })}\n\n`,
+                    ),
+                  );
+                }
+              }
+            }
+
+            if (buffer.trim()) {
+              const delta = parseProviderStreamLine(provider, buffer);
+              if (delta?.text) {
+                controller.enqueue(
+                  encoder.encode(
+                    `data: ${JSON.stringify({
+                      id,
+                      object: 'chat.completion.chunk',
+                      created,
+                      model,
+                      choices: [{ index: 0, delta: { content: delta.text }, finish_reason: null }],
+                    })}\n\n`,
+                  ),
+                );
+              }
+            }
+
+            controller.enqueue(
+              encoder.encode(
+                `data: ${JSON.stringify({
+                  id,
+                  object: 'chat.completion.chunk',
+                  created,
+                  model,
+                  choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+                })}\n\n`,
+              ),
+            );
+            controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+            controller.close();
+
+            const latencyMs = Date.now() - startedAt;
+            recordSuccess(provider.id);
+            runBackground(
+              writeLog(user.id, provider.id, 'success', latencyMs, mode),
+              `stream-log-${provider.id}`,
+            );
+          } catch (streamErr: any) {
+            controller.error(streamErr);
+          }
+        },
+        cancel() {
+          reader.cancel().catch(() => {});
+        },
+      });
+
+      return new Response(stream, {
+        headers: {
+          'Content-Type': 'text/event-stream; charset=utf-8',
+          'Cache-Control': 'no-cache, no-transform',
+          'Connection': 'keep-alive',
+          'access-control-allow-origin': '*',
+        },
+      });
+    }
+
+    if (isTransientFailure(result.status)) recordFailure(provider.id);
+    failures.push(`${provider.name}: ${result.error}`);
+    await writeLog(
+      user.id,
+      provider.id,
+      isFailoverError(result.status) ? 'failover' : 'error',
+      result.latencyMs,
+      mode,
+      result.error,
+    );
+    if (!config.failover_enabled || !isFailoverError(result.status)) break;
+  }
+
+  throw new RequestError(`All selected providers failed streaming. ${failures.join(' | ')}`);
 }
 
 // =============================================================================
@@ -1104,73 +1344,11 @@ const handleChatCompletions = async (c: Context<Env>) => {
   const user = c.get('user');
 
   try {
-    const result = await routedChat(user, { ...body, stream: false });
-
     if (body.stream) {
-      const stream = new ReadableStream({
-        start(controller) {
-          const id = `chatcmpl_${crypto.randomUUID()}`;
-          const created = Math.floor(Date.now() / 1000);
-          const model = result.model || 'oniroute';
-          const content = result.response || '';
-
-          // Initial assistant role chunk
-          controller.enqueue(
-            new TextEncoder().encode(
-              `data: ${JSON.stringify({
-                id,
-                object: 'chat.completion.chunk',
-                created,
-                model,
-                choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }],
-              })}\n\n`
-            )
-          );
-
-          // Stream content chunks (word by word for smooth UI typing)
-          const words = content.split(' ');
-          for (let i = 0; i < words.length; i++) {
-            const chunk = (i === 0 ? '' : ' ') + words[i];
-            controller.enqueue(
-              new TextEncoder().encode(
-                `data: ${JSON.stringify({
-                  id,
-                  object: 'chat.completion.chunk',
-                  created,
-                  model,
-                  choices: [{ index: 0, delta: { content: chunk }, finish_reason: null }],
-                })}\n\n`
-              )
-            );
-          }
-
-          // Final finish chunk
-          controller.enqueue(
-            new TextEncoder().encode(
-              `data: ${JSON.stringify({
-                id,
-                object: 'chat.completion.chunk',
-                created,
-                model,
-                choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
-              })}\n\n`
-            )
-          );
-          controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
-          controller.close();
-        },
-      });
-
-      return new Response(stream, {
-        headers: {
-          'Content-Type': 'text/event-stream; charset=utf-8',
-          'Cache-Control': 'no-cache, no-transform',
-          'Connection': 'keep-alive',
-          'access-control-allow-origin': '*',
-        },
-      });
+      return await routedChatStream(user, body);
     }
 
+    const result = await routedChat(user, body);
     return c.json({
       id: `chatcmpl_${crypto.randomUUID()}`,
       object: 'chat.completion',

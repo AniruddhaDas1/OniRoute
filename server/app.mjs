@@ -2,13 +2,14 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { randomUUID } from 'node:crypto';
 import { ReadableStream } from 'node:stream/web';
-import { TextEncoder } from 'node:util';
+import { TextEncoder, TextDecoder } from 'node:util';
 import { db, LOCAL_USER_ID } from './db.mjs';
 import { sha256, createGatewayKey } from './crypto.mjs';
 import {
   buildProviderRequest,
   normaliseMessages,
   parseProviderResponse,
+  parseProviderStreamLine,
   embedText,
   pruneContextToBudget,
   validateProviderUrl,
@@ -23,8 +24,8 @@ app.use(
   '*',
   cors({
     origin: '*',
-    allowHeaders: ['Authorization', 'Content-Type', 'apikey', 'x-client-info', 'x-oniroute-key'],
-    allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowHeaders: ['Authorization', 'Content-Type', 'apikey', 'x-client-info', 'x-oniroute-key', 'x-oniroute-admin-key'],
+    allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   }),
 );
 
@@ -48,6 +49,44 @@ function shuffle(array) {
   return result;
 }
 
+// =============================================================================
+// Control-Plane Authentication Middleware (Protects Management & Vault Secrets)
+// =============================================================================
+export async function authenticateControlPlane(c, next) {
+  const authHeader = c.req.header('Authorization') || c.req.header('authorization') || '';
+  const token = authHeader.replace(/^Bearer\s+/i, '').trim();
+  const customKey = (c.req.header('x-oniroute-admin-key') || c.req.header('x-oniroute-key') || token).trim();
+
+  // 1. Explicit admin key configured in environment
+  const envAdminKey = process.env.ONIROUTE_ADMIN_KEY;
+  if (envAdminKey && customKey === envAdminKey) {
+    return next();
+  }
+
+  // 2. Valid gateway key
+  if (customKey && customKey.startsWith('or_')) {
+    const keyRecord = db.getGatewayKeyByHash(sha256(customKey));
+    if (keyRecord && !keyRecord.revoked_at) {
+      return next();
+    }
+  }
+
+  // 3. Local loopback check (Allowed when server is strictly bound to localhost/127.0.0.1)
+  const hostHeader = (c.req.header('host') || '').toLowerCase();
+  const isLoopback =
+    hostHeader.startsWith('localhost') ||
+    hostHeader.startsWith('127.0.0.1') ||
+    hostHeader.startsWith('0.0.0.0');
+
+  const isBoundToLocalhost = !process.env.HOST || process.env.HOST === '127.0.0.1';
+
+  if (isLoopback && isBoundToLocalhost) {
+    return next();
+  }
+
+  return c.json(err('Unauthorized control-plane access. A valid OniRoute key or ONIROUTE_ADMIN_KEY is required for remote management.'), 401);
+}
+
 async function sendToProvider(provider, apiKey, messages, options, timeoutMs) {
   const startedAt = Date.now();
   const controller = new AbortController();
@@ -59,6 +98,7 @@ async function sendToProvider(provider, apiKey, messages, options, timeoutMs) {
       headers: req.headers,
       body: req.body,
       signal: controller.signal,
+      redirect: 'error',
     });
     const latencyMs = Date.now() - startedAt;
     if (!res.ok) {
@@ -69,6 +109,34 @@ async function sendToProvider(provider, apiKey, messages, options, timeoutMs) {
       return { ok: false, latencyMs, status: 502, error: 'Provider returned an empty response.' };
     }
     return { ok: true, latencyMs, parsed };
+  } catch (error) {
+    return { ok: false, latencyMs: Date.now() - startedAt, status: 503, error: error.message };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function sendToProviderStream(provider, apiKey, messages, options, timeoutMs) {
+  const startedAt = Date.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs || 15000);
+  try {
+    const req = buildProviderRequest(provider, apiKey, messages, { ...options, stream: true });
+    const res = await fetch(req.url, {
+      method: 'POST',
+      headers: req.headers,
+      body: req.body,
+      signal: controller.signal,
+      redirect: 'error',
+    });
+    const latencyMs = Date.now() - startedAt;
+    if (!res.ok) {
+      return { ok: false, latencyMs, status: res.status, error: (await res.text()).slice(0, 600) };
+    }
+    if (!res.body) {
+      return { ok: false, latencyMs, status: 502, error: 'Provider returned no response stream.' };
+    }
+    return { ok: true, latencyMs, response: res, provider };
   } catch (error) {
     return { ok: false, latencyMs: Date.now() - startedAt, status: 503, error: error.message };
   } finally {
@@ -97,7 +165,7 @@ async function refineUserMessage(providers, userMessage, refinePrompt, timeoutMs
   return userMessage;
 }
 
-async function routedChat(body, userId = LOCAL_USER_ID, keyRecord = null) {
+async function resolveProvidersAndMessages(body, userId, keyRecord) {
   let mode = body.mode === 'refined' ? 'refined' : 'direct';
   if (keyRecord?.gateway_mode && keyRecord.gateway_mode !== 'flexible') {
     mode = keyRecord.gateway_mode;
@@ -135,17 +203,13 @@ async function routedChat(body, userId = LOCAL_USER_ID, keyRecord = null) {
   }
 
   if (!providers.length) {
-    throw new Error(
-      keyRecord?.provider_group_id
-        ? 'No active AI providers available in the assigned Provider Group.'
-        : 'No active AI providers configured in OniRoute. Add one in the dashboard.'
-    );
+    throw new Error('No active providers available for routing.');
   }
 
-  const turns = [];
   const systemBlocks = [];
-  if (body.system_prompt?.trim()) systemBlocks.push(body.system_prompt.trim());
+  if (body.system_prompt) systemBlocks.push(body.system_prompt);
 
+  let turns = [];
   if (Array.isArray(body.messages) && body.messages.length) {
     const normalised = normaliseMessages(body.messages);
     for (const msg of normalised) {
@@ -153,53 +217,58 @@ async function routedChat(body, userId = LOCAL_USER_ID, keyRecord = null) {
       else turns.push(msg);
     }
   } else if (body.message?.trim()) {
-    turns.push({ role: 'user', content: body.message.trim() });
+    turns = [{ role: 'user', content: body.message.trim() }];
   }
 
-  if (!turns.length) throw new Error('A message or messages array is required.');
-
-  // Refine message if configured
   const refinePrompt = body.refine_prompt?.trim() ?? config.refine_prompt?.trim();
-  if (refinePrompt && turns.some((t) => t.role === 'user')) {
-    const lastUserIdx = turns.map((t) => t.role).lastIndexOf('user');
-    const refined = await refineUserMessage(providers, turns[lastUserIdx].content, refinePrompt, config.timeout_ms);
-    turns[lastUserIdx] = { role: 'user', content: refined };
+  if (refinePrompt && turns.some((turn) => turn.role === 'user')) {
+    const lastUserIndex = turns.map((turn) => turn.role).lastIndexOf('user');
+    const originalMessage = turns[lastUserIndex].content;
+    const refined = await refineUserMessage(providers, originalMessage, refinePrompt, config.timeout_ms);
+    turns[lastUserIndex] = { role: 'user', content: refined };
   }
 
   let contextUsed = [];
-  if (mode === 'refined') {
-    let embeddingProviderId = body.embedding_provider_id;
-    if (!embeddingProviderId && body.knowledge_base_id) {
-      const kb = db.getKnowledgeBaseById(body.knowledge_base_id, userId);
-      embeddingProviderId = kb?.embedding_provider_id;
-    }
-    const embeddingProvider = providers.find((p) => p.id === embeddingProviderId) || providers[0];
-    const apiKey = db.getProviderSecret(embeddingProvider.id);
-    if (!apiKey) throw new Error('Embedding provider secret is missing.');
-
-    const query = turns.filter((t) => t.role === 'user').at(-1)?.content ?? '';
-    const queryEmbedding = await embedText(embeddingProvider, apiKey, query);
-    const matches = searchVectorChunks(userId, queryEmbedding, body.knowledge_base_id, 6);
-    contextUsed = matches.map((m) => m.content);
-
-    if (contextUsed.length) {
-      systemBlocks.push(
-        'Answer using the supplied knowledge when relevant. If the knowledge does not contain the answer, say so clearly.' +
-          `\n\nKnowledge:\n${contextUsed.join('\n\n---\n\n')}`,
-      );
+  if (mode === 'refined' && body.knowledge_base_id) {
+    const kb = db.getKnowledgeBaseById(body.knowledge_base_id, userId);
+    if (kb) {
+      const embeddingProviderId = body.embedding_provider_id || kb.embedding_provider_id || providers[0]?.id;
+      const embeddingProvider = db.getProviderById(embeddingProviderId, userId);
+      const apiKey = embeddingProvider ? db.getProviderSecret(embeddingProvider.id) : null;
+      if (embeddingProvider && apiKey) {
+        const query = turns.filter((t) => t.role === 'user').at(-1)?.content ?? '';
+        try {
+          const queryEmbedding = await embedText(embeddingProvider, apiKey, query);
+          const matches = searchVectorChunks(userId, queryEmbedding, body.knowledge_base_id, 6);
+          contextUsed = matches.map((m) => m.content);
+          if (contextUsed.length) {
+            systemBlocks.push(
+              'Answer using the supplied knowledge when relevant. If the knowledge does not contain the answer, say so clearly.' +
+                `\n\nKnowledge:\n${contextUsed.join('\n\n---\n\n')}`,
+            );
+          }
+        } catch {
+          // Non-fatal RAG search fallback
+        }
+      }
     }
   }
 
-  // Enforce isolated context window budget if configured for this key/request
   const effectiveMaxTokens = body.max_context_tokens || keyRecord?.max_context_tokens;
   const messages = pruneContextToBudget(systemBlocks, turns, effectiveMaxTokens);
+
+  return { mode, config, providers, messages, systemBlocks, turns, contextUsed };
+}
+
+async function routedChat(body, userId = LOCAL_USER_ID, keyRecord = null) {
+  const { mode, config, providers, messages } = await resolveProvidersAndMessages(body, userId, keyRecord);
   const maxAttempts = Math.min(providers.length, (config.max_retries ?? 3) + 1);
   const failures = [];
 
   for (const provider of providers.slice(0, maxAttempts)) {
     const apiKey = db.getProviderSecret(provider.id);
     if (!apiKey) {
-      failures.push(`${provider.name}: No API key`);
+      failures.push(`${provider.name}: No API key configured`);
       continue;
     }
     const result = await sendToProvider(provider, apiKey, messages, body, config.timeout_ms);
@@ -221,7 +290,6 @@ async function routedChat(body, userId = LOCAL_USER_ID, keyRecord = null) {
         usage: result.parsed.usage,
         latency_ms: result.latencyMs,
         mode,
-        context_used: mode === 'refined' ? contextUsed : undefined,
       };
     }
 
@@ -241,17 +309,172 @@ async function routedChat(body, userId = LOCAL_USER_ID, keyRecord = null) {
   throw new Error(`All providers failed. ${failures.join(' | ')}`);
 }
 
+async function routedChatStream(body, userId = LOCAL_USER_ID, keyRecord = null) {
+  const { mode, config, providers, messages } = await resolveProvidersAndMessages(body, userId, keyRecord);
+  const maxAttempts = Math.min(providers.length, (config.max_retries ?? 3) + 1);
+  const failures = [];
+
+  for (const provider of providers.slice(0, maxAttempts)) {
+    const apiKey = db.getProviderSecret(provider.id);
+    if (!apiKey) {
+      failures.push(`${provider.name}: No API key configured`);
+      continue;
+    }
+    const result = await sendToProviderStream(provider, apiKey, messages, body, config.timeout_ms);
+    if (result.ok) {
+      // True end-to-end streaming bridge
+      const reader = result.response.body.getReader();
+      const decoder = new TextDecoder();
+      const encoder = new TextEncoder();
+      const id = `chatcmpl_${randomUUID()}`;
+      const created = Math.floor(Date.now() / 1000);
+      const model = provider.model_name || 'oniroute';
+      const startedAt = Date.now();
+
+      let buffer = '';
+
+      const stream = new ReadableStream({
+        async start(controller) {
+          // Initial assistant role event
+          controller.enqueue(
+            encoder.encode(
+              `data: ${JSON.stringify({
+                id,
+                object: 'chat.completion.chunk',
+                created,
+                model,
+                choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }],
+              })}\n\n`,
+            ),
+          );
+
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+
+              buffer += decoder.decode(value, { stream: true });
+              const lines = buffer.split('\n');
+              buffer = lines.pop() ?? '';
+
+              for (const line of lines) {
+                const delta = parseProviderStreamLine(provider, line);
+                if (!delta) continue;
+
+                if (delta.text) {
+                  controller.enqueue(
+                    encoder.encode(
+                      `data: ${JSON.stringify({
+                        id,
+                        object: 'chat.completion.chunk',
+                        created,
+                        model,
+                        choices: [{ index: 0, delta: { content: delta.text }, finish_reason: null }],
+                      })}\n\n`,
+                    ),
+                  );
+                }
+
+                if (delta.done || delta.finishReason) {
+                  controller.enqueue(
+                    encoder.encode(
+                      `data: ${JSON.stringify({
+                        id,
+                        object: 'chat.completion.chunk',
+                        created,
+                        model,
+                        choices: [{ index: 0, delta: {}, finish_reason: delta.finishReason || 'stop' }],
+                      })}\n\n`,
+                    ),
+                  );
+                }
+              }
+            }
+
+            if (buffer.trim()) {
+              const delta = parseProviderStreamLine(provider, buffer);
+              if (delta?.text) {
+                controller.enqueue(
+                  encoder.encode(
+                    `data: ${JSON.stringify({
+                      id,
+                      object: 'chat.completion.chunk',
+                      created,
+                      model,
+                      choices: [{ index: 0, delta: { content: delta.text }, finish_reason: null }],
+                    })}\n\n`,
+                  ),
+                );
+              }
+            }
+
+            controller.enqueue(
+              encoder.encode(
+                `data: ${JSON.stringify({
+                  id,
+                  object: 'chat.completion.chunk',
+                  created,
+                  model,
+                  choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+                })}\n\n`,
+              ),
+            );
+            controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+            controller.close();
+
+            db.writeLog({
+              user_id: userId,
+              provider_id: provider.id,
+              status: 'success',
+              latency_ms: Date.now() - startedAt,
+              mode,
+            });
+          } catch (streamErr) {
+            controller.error(streamErr);
+          }
+        },
+        cancel() {
+          reader.cancel().catch(() => {});
+        },
+      });
+
+      return new Response(stream, {
+        headers: {
+          'Content-Type': 'text/event-stream; charset=utf-8',
+          'Cache-Control': 'no-cache, no-transform',
+          'Connection': 'keep-alive',
+          'access-control-allow-origin': '*',
+        },
+      });
+    }
+
+    failures.push(`${provider.name}: ${result.error}`);
+    db.writeLog({
+      user_id: userId,
+      provider_id: provider.id,
+      status: isFailoverError(result.status) ? 'failover' : 'error',
+      latency_ms: result.latencyMs,
+      mode,
+      error_message: result.error,
+    });
+
+    if (!config.failover_enabled || !isFailoverError(result.status)) break;
+  }
+
+  throw new Error(`All providers failed streaming. ${failures.join(' | ')}`);
+}
+
 // =============================================================================
-// REST Routes
+// REST Routes (Protected Control Plane)
 // =============================================================================
 
 // Providers
-app.get('/providers', (c) => c.json(ok(db.getProviders())));
+app.get('/providers', authenticateControlPlane, (c) => c.json(ok(db.getProviders())));
 
-app.post('/providers', async (c) => {
+app.post('/providers', authenticateControlPlane, async (c) => {
   const body = await c.req.json();
   try {
-    validateProviderUrl(body);
+    validateProviderUrl(body, false);
   } catch (e) {
     return c.json(err(e.message), 400);
   }
@@ -259,20 +482,20 @@ app.post('/providers', async (c) => {
   return c.json(ok(provider), 201);
 });
 
-app.put('/providers/reorder', async (c) => {
+app.put('/providers/reorder', authenticateControlPlane, async (c) => {
   const { provider_ids } = await c.req.json();
   db.reorderProviders(provider_ids);
   return c.json(ok({ reordered: provider_ids }));
 });
 
-app.put('/providers/:id', async (c) => {
+app.put('/providers/:id', authenticateControlPlane, async (c) => {
   const id = c.req.param('id');
   const body = await c.req.json();
   const existing = db.getProviderById(id);
   if (!existing) return c.json(err('Not found'), 404);
 
   try {
-    validateProviderUrl({ ...existing, ...body });
+    validateProviderUrl({ ...existing, ...body }, false);
   } catch (e) {
     return c.json(err(e.message), 400);
   }
@@ -281,19 +504,19 @@ app.put('/providers/:id', async (c) => {
   return provider ? c.json(ok(provider)) : c.json(err('Not found'), 404);
 });
 
-app.delete('/providers/:id', (c) => {
+app.delete('/providers/:id', authenticateControlPlane, (c) => {
   const deleted = db.deleteProvider(c.req.param('id'));
   return c.json(ok({ deleted }));
 });
 
-app.get('/providers/:id/secret', (c) => {
+app.get('/providers/:id/secret', authenticateControlPlane, (c) => {
   const provider = db.getProviderById(c.req.param('id'));
   if (!provider) return c.json(err('Not found'), 404);
   const secret = db.getProviderSecret(provider.id);
   return c.json(ok({ api_key: secret || '', exists: Boolean(secret) }));
 });
 
-app.post('/test-provider/:id', async (c) => {
+app.post('/test-provider/:id', authenticateControlPlane, async (c) => {
   const provider = db.getProviderById(c.req.param('id'));
   if (!provider) return c.json(err('Not found'), 404);
   const apiKey = db.getProviderSecret(provider.id);
@@ -314,27 +537,27 @@ app.post('/test-provider/:id', async (c) => {
 });
 
 // Routing
-app.get('/routing-config', (c) => c.json(ok(db.getRoutingConfig())));
-app.put('/routing-config', async (c) => {
+app.get('/routing-config', authenticateControlPlane, (c) => c.json(ok(db.getRoutingConfig())));
+app.put('/routing-config', authenticateControlPlane, async (c) => {
   const body = await c.req.json();
   const updated = db.updateRoutingConfig(body);
   return c.json(ok(updated));
 });
 
 // Knowledge Bases
-app.get('/knowledge', (c) => c.json(ok(db.getKnowledgeBases())));
-app.post('/knowledge', async (c) => {
+app.get('/knowledge', authenticateControlPlane, (c) => c.json(ok(db.getKnowledgeBases())));
+app.post('/knowledge', authenticateControlPlane, async (c) => {
   const body = await c.req.json();
   const kb = db.createKnowledgeBase(body);
   return c.json(ok(kb), 201);
 });
-app.delete('/knowledge/:id', (c) => {
+app.delete('/knowledge/:id', authenticateControlPlane, (c) => {
   const deleted = db.deleteKnowledgeBase(c.req.param('id'));
   return c.json(ok({ deleted }));
 });
 
 // Asynchronous Ingest
-app.post('/knowledge/:id/ingest', async (c) => {
+app.post('/knowledge/:id/ingest', authenticateControlPlane, async (c) => {
   const id = c.req.param('id');
   const kb = db.getKnowledgeBaseById(id);
   if (!kb) return c.json(err('Not found'), 404);
@@ -346,7 +569,6 @@ app.post('/knowledge/:id/ingest', async (c) => {
 
   db.updateKnowledgeBase(id, { status: 'processing', ingest_started_at: new Date().toISOString() });
 
-  // Async ingestion in background
   (async () => {
     try {
       let content = kb.source_content;
@@ -379,9 +601,9 @@ app.post('/knowledge/:id/ingest', async (c) => {
 });
 
 // Provider Groups
-app.get('/provider-groups', (c) => c.json(ok(db.getProviderGroups())));
+app.get('/provider-groups', authenticateControlPlane, (c) => c.json(ok(db.getProviderGroups())));
 
-app.post('/provider-groups', async (c) => {
+app.post('/provider-groups', authenticateControlPlane, async (c) => {
   const body = await c.req.json();
   if (Array.isArray(body.provider_ids) && body.provider_ids.length > 0) {
     const userProviders = db.getProviders(LOCAL_USER_ID);
@@ -395,7 +617,7 @@ app.post('/provider-groups', async (c) => {
   return c.json(ok(group), 201);
 });
 
-app.put('/provider-groups/:id', async (c) => {
+app.put('/provider-groups/:id', authenticateControlPlane, async (c) => {
   const id = c.req.param('id');
   const body = await c.req.json();
   if (Array.isArray(body.provider_ids) && body.provider_ids.length > 0) {
@@ -411,21 +633,21 @@ app.put('/provider-groups/:id', async (c) => {
   return c.json(ok(updated));
 });
 
-app.delete('/provider-groups/:id', (c) => {
+app.delete('/provider-groups/:id', authenticateControlPlane, (c) => {
   const deleted = db.deleteProviderGroup(c.req.param('id'));
   return c.json(ok({ deleted }));
 });
 
 // Logs
-app.get('/logs', (c) => {
+app.get('/logs', authenticateControlPlane, (c) => {
   const limit = Number(c.req.query('limit') || 50);
   const status = c.req.query('status') || null;
   return c.json(ok({ logs: db.getLogs(LOCAL_USER_ID, limit, status), next_cursor: null }));
 });
 
 // Gateway Keys
-app.get('/gateway-keys', (c) => c.json(ok(db.getGatewayKeys())));
-app.post('/gateway-keys', async (c) => {
+app.get('/gateway-keys', authenticateControlPlane, (c) => c.json(ok(db.getGatewayKeys())));
+app.post('/gateway-keys', authenticateControlPlane, async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const key = createGatewayKey();
   const keyHash = sha256(key);
@@ -444,17 +666,17 @@ app.post('/gateway-keys', async (c) => {
   );
   return c.json(ok({ ...record, key }), 201);
 });
-app.delete('/gateway-keys/:id', (c) => {
+app.delete('/gateway-keys/:id', authenticateControlPlane, (c) => {
   const revoked = db.revokeGatewayKey(c.req.param('id'));
   return c.json(ok({ revoked }));
 });
 
 // --- Super Admin & Member Management ---
-app.get('/admin/members', (c) => {
+app.get('/admin/members', authenticateControlPlane, (c) => {
   return c.json(ok(db.getMembers()));
 });
 
-app.patch('/admin/members/:id', async (c) => {
+app.patch('/admin/members/:id', authenticateControlPlane, async (c) => {
   try {
     const id = c.req.param('id');
     const body = await c.req.json();
@@ -511,70 +733,11 @@ const handleChatCompletionsStandalone = async (c) => {
 
   try {
     const body = await c.req.json();
-    const result = await routedChat(body, LOCAL_USER_ID, keyRecord);
-
     if (body.stream) {
-      const stream = new ReadableStream({
-        start(controller) {
-          const id = `chatcmpl_${randomUUID()}`;
-          const created = Math.floor(Date.now() / 1000);
-          const model = result.model || 'oniroute';
-          const content = result.response || '';
-
-          controller.enqueue(
-            new TextEncoder().encode(
-              `data: ${JSON.stringify({
-                id,
-                object: 'chat.completion.chunk',
-                created,
-                model,
-                choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }],
-              })}\n\n`
-            )
-          );
-
-          const words = content.split(' ');
-          for (let i = 0; i < words.length; i++) {
-            const chunk = (i === 0 ? '' : ' ') + words[i];
-            controller.enqueue(
-              new TextEncoder().encode(
-                `data: ${JSON.stringify({
-                  id,
-                  object: 'chat.completion.chunk',
-                  created,
-                  model,
-                  choices: [{ index: 0, delta: { content: chunk }, finish_reason: null }],
-                })}\n\n`
-              )
-            );
-          }
-
-          controller.enqueue(
-            new TextEncoder().encode(
-              `data: ${JSON.stringify({
-                id,
-                object: 'chat.completion.chunk',
-                created,
-                model,
-                choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
-              })}\n\n`
-            )
-          );
-          controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
-          controller.close();
-        },
-      });
-
-      return new Response(stream, {
-        headers: {
-          'Content-Type': 'text/event-stream; charset=utf-8',
-          'Cache-Control': 'no-cache, no-transform',
-          'Connection': 'keep-alive',
-          'access-control-allow-origin': '*',
-        },
-      });
+      return await routedChatStream(body, LOCAL_USER_ID, keyRecord);
     }
 
+    const result = await routedChat(body, LOCAL_USER_ID, keyRecord);
     return c.json({
       id: `chatcmpl_${randomUUID()}`,
       object: 'chat.completion',
@@ -617,4 +780,3 @@ app.get('/v1/v1/models', handleModelsStandalone);
 
 app.get('/health', (c) => c.json({ status: 'ok', server: 'oniroute-local', port: 1001 }));
 app.get('/v1/health', (c) => c.json({ status: 'ok', server: 'oniroute-local', port: 1001 }));
-

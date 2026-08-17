@@ -30,14 +30,43 @@ export interface ProviderResponse {
   usage?: TokenUsage;
 }
 
+export interface StreamDelta {
+  text?: string;
+  finishReason?: string | null;
+  done?: boolean;
+}
+
 /** Anthropic requires an explicit ceiling, so a default is unavoidable there. */
 const DEFAULT_MAX_TOKENS = 4096;
 
+function isAllowedDomain(hostname: string, allowedDomains: string[]): boolean {
+  const h = hostname.toLowerCase();
+  return allowedDomains.some((domain) => h === domain || h.endsWith(`.${domain}`));
+}
+
+function isPrivateOrLoopbackHost(hostname: string): boolean {
+  const h = hostname.toLowerCase();
+  if (h === 'localhost' || h === '127.0.0.1' || h === '0.0.0.0' || h === '::1' || h.endsWith('.local')) {
+    return true;
+  }
+  // Cloud metadata endpoint
+  if (h === '169.254.169.254' || h.startsWith('169.254.')) {
+    return true;
+  }
+  // RFC1918 IPv4 subnets
+  if (/^10\./.test(h)) return true;
+  if (/^192\.168\./.test(h)) return true;
+  if (/^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(h)) return true;
+  // IPv6 link-local
+  if (/^fe80:/i.test(h)) return true;
+  return false;
+}
+
 /**
- * Validates provider endpoint URLs against known provider boundaries to prevent
- * credential exfiltration or malicious redirect attacks.
+ * Validates provider endpoint URLs against strict domain boundaries and prevents
+ * SSRF and credential exfiltration.
  */
-export function validateProviderUrl(provider: ApiProvider): void {
+export function validateProviderUrl(provider: ApiProvider, isCloudMode = true): void {
   const fullUrl = joinUrl(provider.base_url, provider.endpoint);
   let parsed: URL;
   try {
@@ -56,38 +85,47 @@ export function validateProviderUrl(provider: ApiProvider): void {
 
   const hostname = parsed.hostname.toLowerCase();
 
+  // Cloud Mode SSRF Prevention: Block internal subnets and metadata
+  if (isCloudMode && isPrivateOrLoopbackHost(hostname)) {
+    throw new Error(`Access to private network or metadata destinations (${hostname}) is forbidden in Cloud mode to prevent SSRF.`);
+  }
+
   switch (provider.provider_type) {
     case 'openai':
-      if (!hostname.endsWith('openai.com') && !hostname.endsWith('azure.com')) {
+      if (!isAllowedDomain(hostname, ['openai.com', 'azure.com', 'openai.azure.com'])) {
         throw new Error(`Invalid OpenAI endpoint domain: "${hostname}". Expected api.openai.com or *.openai.azure.com.`);
       }
       break;
 
     case 'anthropic':
-      if (!hostname.endsWith('anthropic.com')) {
+      if (!isAllowedDomain(hostname, ['anthropic.com'])) {
         throw new Error(`Invalid Anthropic endpoint domain: "${hostname}". Expected api.anthropic.com.`);
       }
       break;
 
     case 'google':
-      if (!hostname.endsWith('googleapis.com')) {
+      if (!isAllowedDomain(hostname, ['googleapis.com'])) {
         throw new Error(`Invalid Google Gemini endpoint domain: "${hostname}". Expected generativelanguage.googleapis.com.`);
       }
       break;
 
     case 'ollama': {
-      const isLoopback = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '0.0.0.0' || hostname.endsWith('.local');
-      const isCloud = hostname.endsWith('ollama.com') || hostname.endsWith('ollama.ai');
-      const isPrivateSubnet = /^10\.|^192\.168\.|^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(hostname);
-      if (!isLoopback && !isCloud && !isPrivateSubnet && parsed.protocol !== 'https:') {
-        throw new Error(`Invalid Ollama endpoint host: "${hostname}". Expected localhost, ollama.com, or private network.`);
+      const isLoopback = isPrivateOrLoopbackHost(hostname);
+      const isOfficialCloud = isAllowedDomain(hostname, ['ollama.com', 'ollama.ai']);
+      if (isCloudMode) {
+        if (!isOfficialCloud) {
+          throw new Error(`In Cloud mode, Ollama endpoints must use official cloud domains (ollama.com). Got: "${hostname}".`);
+        }
+      } else {
+        if (!isLoopback && !isOfficialCloud && parsed.protocol !== 'https:') {
+          throw new Error(`Invalid Ollama endpoint host: "${hostname}". Expected localhost, ollama.com, or private network.`);
+        }
       }
       break;
     }
 
     case 'custom':
     default:
-      // Custom endpoints require valid HTTP(S) URL
       if (!hostname) {
         throw new Error('Custom provider must specify a valid hostname.');
       }
@@ -136,7 +174,6 @@ export function normaliseMessages(raw: ReadonlyArray<any>): ChatMessage[] {
   return messages;
 }
 
-/** Collapse runs of the same role for strict upstream providers (Anthropic, Google). */
 function mergeSameRole(messages: ChatMessage[]): ChatMessage[] {
   return messages.reduce<ChatMessage[]>((merged, message) => {
     const previous = merged.at(-1);
@@ -200,7 +237,7 @@ export function buildProviderRequest(
   messages: ChatMessage[],
   options: CompletionOptions = {},
 ): ProviderRequest {
-  validateProviderUrl(provider);
+  validateProviderUrl(provider, false);
   const url = joinUrl(provider.base_url, provider.endpoint);
   const stream = Boolean(options.stream);
 
@@ -225,7 +262,6 @@ export function buildProviderRequest(
 
     case 'google': {
       const { system, turns } = splitSystem(messages);
-      // For Google streaming, endpoint can use streamGenerateContent
       let googleUrl = url;
       if (stream && !googleUrl.includes('streamGenerateContent')) {
         googleUrl = googleUrl.replace(':generateContent', ':streamGenerateContent');
@@ -370,6 +406,99 @@ export function parseProviderResponse(provider: ApiProvider, responseBody: any):
         finishReason: choice?.finish_reason || 'stop',
         usage: usageFrom(responseBody.usage?.prompt_tokens, responseBody.usage?.completion_tokens),
       };
+    }
+  }
+}
+
+/**
+ * Parses streaming events from upstream AI providers line by line in real-time.
+ */
+export function parseProviderStreamLine(provider: ApiProvider, line: string): StreamDelta | null {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.startsWith(':')) return null;
+
+  switch (provider.provider_type) {
+    case 'anthropic': {
+      if (!trimmed.startsWith('data:')) return null;
+      const dataStr = trimmed.slice(5).trim();
+      if (!dataStr) return null;
+      try {
+        const json = JSON.parse(dataStr);
+        if (json.type === 'content_block_delta') {
+          return { text: json.delta?.text ?? '' };
+        }
+        if (json.type === 'message_delta') {
+          return { finishReason: json.delta?.stop_reason === 'max_tokens' ? 'length' : 'stop' };
+        }
+        if (json.type === 'message_stop') {
+          return { done: true };
+        }
+      } catch {
+        return null;
+      }
+      return null;
+    }
+
+    case 'google': {
+      if (!trimmed.startsWith('data:')) return null;
+      const dataStr = trimmed.slice(5).trim();
+      if (!dataStr) return null;
+      try {
+        const json = JSON.parse(dataStr);
+        const candidate = json.candidates?.[0];
+        const text = (candidate?.content?.parts ?? []).map((p: any) => p.text ?? '').join('');
+        const finish = candidate?.finishReason ? (candidate.finishReason === 'MAX_TOKENS' ? 'length' : 'stop') : null;
+        return { text, finishReason: finish };
+      } catch {
+        return null;
+      }
+    }
+
+    case 'ollama': {
+      const dataStr = trimmed.startsWith('data:') ? trimmed.slice(5).trim() : trimmed;
+      if (dataStr === '[DONE]') return { done: true };
+      try {
+        const json = JSON.parse(dataStr);
+        if (json.message?.content !== undefined) {
+          return {
+            text: json.message.content ?? '',
+            finishReason: json.done ? (json.done_reason || 'stop') : null,
+            done: json.done ?? false,
+          };
+        }
+        const choice = json.choices?.[0];
+        if (choice) {
+          return {
+            text: choice.delta?.content ?? '',
+            finishReason: choice.finish_reason ?? null,
+            done: Boolean(choice.finish_reason),
+          };
+        }
+      } catch {
+        return null;
+      }
+      return null;
+    }
+
+    case 'openai':
+    case 'custom':
+    default: {
+      if (!trimmed.startsWith('data:')) return null;
+      const dataStr = trimmed.slice(5).trim();
+      if (dataStr === '[DONE]') return { done: true };
+      try {
+        const json = JSON.parse(dataStr);
+        const choice = json.choices?.[0];
+        if (choice) {
+          return {
+            text: choice.delta?.content ?? '',
+            finishReason: choice.finish_reason ?? null,
+          };
+        }
+      } catch {
+        return null;
+      }
+      return null;
     }
   }
 }
