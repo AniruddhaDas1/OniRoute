@@ -332,9 +332,13 @@ function readOptions(body: ChatBody): CompletionOptions {
     : undefined;
   return {
     maxTokens: body.max_tokens === undefined ? undefined : numeric(body.max_tokens, 1, 200_000),
+    max_completion_tokens: (body as any).max_completion_tokens === undefined ? undefined : numeric((body as any).max_completion_tokens, 1, 200_000),
     temperature: body.temperature === undefined ? undefined : numeric(body.temperature, 0, 2),
     topP: body.top_p === undefined ? undefined : numeric(body.top_p, 0, 1),
     stop: stop?.length ? stop.slice(0, 4) : undefined,
+    tools: (body as any).tools,
+    tool_choice: (body as any).tool_choice,
+    response_format: (body as any).response_format,
   };
 }
 
@@ -496,6 +500,7 @@ async function routedChat(user: Caller, body: ChatBody) {
       await writeLog(user.id, provider.id, 'success', result.latencyMs, mode, undefined, result.parsed.usage);
       return {
         response: result.parsed.content,
+        tool_calls: result.parsed.tool_calls,
         provider_used: provider.name,
         provider_id: provider.id,
         model: result.parsed.model,
@@ -646,7 +651,12 @@ async function routedChatStream(user: Caller, body: ChatBody): Promise<Response>
                 const delta = parseProviderStreamLine(provider, line);
                 if (!delta) continue;
 
-                if (delta.text) {
+                const deltaPayload: Record<string, any> = {};
+                if (delta.role) deltaPayload.role = delta.role;
+                if (delta.text !== undefined && delta.text !== '') deltaPayload.content = delta.text;
+                if (delta.toolCalls) deltaPayload.tool_calls = delta.toolCalls;
+
+                if (Object.keys(deltaPayload).length > 0) {
                   controller.enqueue(
                     encoder.encode(
                       `data: ${JSON.stringify({
@@ -654,7 +664,7 @@ async function routedChatStream(user: Caller, body: ChatBody): Promise<Response>
                         object: 'chat.completion.chunk',
                         created,
                         model,
-                        choices: [{ index: 0, delta: { content: delta.text }, finish_reason: null }],
+                        choices: [{ index: 0, delta: deltaPayload, finish_reason: null }],
                       })}\n\n`,
                     ),
                   );
@@ -679,18 +689,25 @@ async function routedChatStream(user: Caller, body: ChatBody): Promise<Response>
 
             if (buffer.trim()) {
               const delta = parseProviderStreamLine(provider, buffer);
-              if (delta?.text) {
-                controller.enqueue(
-                  encoder.encode(
-                    `data: ${JSON.stringify({
-                      id,
-                      object: 'chat.completion.chunk',
-                      created,
-                      model,
-                      choices: [{ index: 0, delta: { content: delta.text }, finish_reason: null }],
-                    })}\n\n`,
-                  ),
-                );
+              if (delta) {
+                const deltaPayload: Record<string, any> = {};
+                if (delta.role) deltaPayload.role = delta.role;
+                if (delta.text !== undefined && delta.text !== '') deltaPayload.content = delta.text;
+                if (delta.toolCalls) deltaPayload.tool_calls = delta.toolCalls;
+
+                if (Object.keys(deltaPayload).length > 0) {
+                  controller.enqueue(
+                    encoder.encode(
+                      `data: ${JSON.stringify({
+                        id,
+                        object: 'chat.completion.chunk',
+                        created,
+                        model,
+                        choices: [{ index: 0, delta: deltaPayload, finish_reason: null }],
+                      })}\n\n`,
+                    ),
+                  );
+                }
               }
             }
 
@@ -1467,12 +1484,19 @@ const handleChatCompletions = async (c: Context<Env>) => {
     }
 
     const result = await routedChat(user, body);
+    const messagePayload: Record<string, any> = {
+      role: 'assistant',
+      content: result.response ?? null,
+    };
+    if (result.tool_calls) {
+      messagePayload.tool_calls = result.tool_calls;
+    }
     return c.json({
       id: `chatcmpl_${crypto.randomUUID()}`,
       object: 'chat.completion',
       created: Math.floor(Date.now() / 1000),
       model: result.model,
-      choices: [{ index: 0, message: { role: 'assistant', content: result.response }, finish_reason: result.finish_reason }],
+      choices: [{ index: 0, message: messagePayload, finish_reason: result.finish_reason }],
       usage: result.usage ?? { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
       oniroute: { provider: result.provider_used, mode: result.mode, latency_ms: result.latency_ms },
     });

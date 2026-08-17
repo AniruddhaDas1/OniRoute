@@ -293,6 +293,7 @@ async function routedChat(body, userId = LOCAL_USER_ID, keyRecord = null) {
       });
       return {
         response: result.parsed.content,
+        tool_calls: result.parsed.tool_calls,
         provider_used: provider.name,
         provider_id: provider.id,
         model: result.parsed.model,
@@ -371,7 +372,12 @@ async function routedChatStream(body, userId = LOCAL_USER_ID, keyRecord = null) 
                 const delta = parseProviderStreamLine(provider, line);
                 if (!delta) continue;
 
-                if (delta.text) {
+                const deltaPayload = {};
+                if (delta.role) deltaPayload.role = delta.role;
+                if (delta.text !== undefined && delta.text !== '') deltaPayload.content = delta.text;
+                if (delta.toolCalls) deltaPayload.tool_calls = delta.toolCalls;
+
+                if (Object.keys(deltaPayload).length > 0) {
                   controller.enqueue(
                     encoder.encode(
                       `data: ${JSON.stringify({
@@ -379,7 +385,7 @@ async function routedChatStream(body, userId = LOCAL_USER_ID, keyRecord = null) 
                         object: 'chat.completion.chunk',
                         created,
                         model,
-                        choices: [{ index: 0, delta: { content: delta.text }, finish_reason: null }],
+                        choices: [{ index: 0, delta: deltaPayload, finish_reason: null }],
                       })}\n\n`,
                     ),
                   );
@@ -404,18 +410,25 @@ async function routedChatStream(body, userId = LOCAL_USER_ID, keyRecord = null) 
 
             if (buffer.trim()) {
               const delta = parseProviderStreamLine(provider, buffer);
-              if (delta?.text) {
-                controller.enqueue(
-                  encoder.encode(
-                    `data: ${JSON.stringify({
-                      id,
-                      object: 'chat.completion.chunk',
-                      created,
-                      model,
-                      choices: [{ index: 0, delta: { content: delta.text }, finish_reason: null }],
-                    })}\n\n`,
-                  ),
-                );
+              if (delta) {
+                const deltaPayload = {};
+                if (delta.role) deltaPayload.role = delta.role;
+                if (delta.text !== undefined && delta.text !== '') deltaPayload.content = delta.text;
+                if (delta.toolCalls) deltaPayload.tool_calls = delta.toolCalls;
+
+                if (Object.keys(deltaPayload).length > 0) {
+                  controller.enqueue(
+                    encoder.encode(
+                      `data: ${JSON.stringify({
+                        id,
+                        object: 'chat.completion.chunk',
+                        created,
+                        model,
+                        choices: [{ index: 0, delta: deltaPayload, finish_reason: null }],
+                      })}\n\n`,
+                    ),
+                  );
+                }
               }
             }
 
@@ -839,13 +852,20 @@ const handleChatCompletionsStandalone = async (c) => {
     }
 
     const result = await routedChat(body, LOCAL_USER_ID, keyRecord);
+    const messagePayload = {
+      role: 'assistant',
+      content: result.response ?? null,
+    };
+    if (result.tool_calls) {
+      messagePayload.tool_calls = result.tool_calls;
+    }
     return c.json({
       id: `chatcmpl_${randomUUID()}`,
       object: 'chat.completion',
       created: Math.floor(Date.now() / 1000),
       model: result.model,
       choices: [
-        { index: 0, message: { role: 'assistant', content: result.response }, finish_reason: result.finish_reason },
+        { index: 0, message: messagePayload, finish_reason: result.finish_reason },
       ],
       usage: result.usage ?? { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
       oniroute: { provider: result.provider_used, mode: result.mode, latency_ms: result.latency_ms },

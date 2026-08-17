@@ -287,9 +287,13 @@ export function buildProviderRequest(provider, apiKey, messages, options = {}) {
           messages,
           stream,
           max_tokens: options.maxTokens,
+          max_completion_tokens: options.max_completion_tokens,
           temperature: options.temperature,
           top_p: options.topP,
           stop: options.stop,
+          tools: options.tools,
+          tool_choice: options.tool_choice,
+          response_format: options.response_format,
         })),
       };
   }
@@ -339,6 +343,7 @@ export function parseProviderResponse(provider, responseBody) {
       const choice = responseBody.choices?.[0];
       return {
         content: choice?.message?.content ?? '',
+        tool_calls: choice?.message?.tool_calls,
         model: responseBody.model || provider.model_name,
         finishReason: choice?.finish_reason || 'stop',
         usage: usageFrom(responseBody.usage?.prompt_tokens, responseBody.usage?.completion_tokens),
@@ -351,6 +356,7 @@ export function parseProviderResponse(provider, responseBody) {
       const choice = responseBody.choices?.[0];
       return {
         content: choice?.message?.content ?? '',
+        tool_calls: choice?.message?.tool_calls,
         model: responseBody.model || provider.model_name,
         finishReason: choice?.finish_reason || 'stop',
         usage: usageFrom(responseBody.usage?.prompt_tokens, responseBody.usage?.completion_tokens),
@@ -424,7 +430,9 @@ export function parseProviderStreamLine(provider, line) {
         const choice = json.choices?.[0];
         if (choice) {
           return {
-            text: choice.delta?.content ?? '',
+            text: choice.delta?.content ?? (choice.delta?.tool_calls ? undefined : ''),
+            toolCalls: choice.delta?.tool_calls,
+            role: choice.delta?.role,
             finishReason: choice.finish_reason ?? null,
             done: Boolean(choice.finish_reason),
           };
@@ -449,7 +457,9 @@ export function parseProviderStreamLine(provider, line) {
         const choice = json.choices?.[0];
         if (choice) {
           return {
-            text: choice.delta?.content ?? '',
+            text: choice.delta?.content ?? (choice.delta?.tool_calls ? undefined : ''),
+            toolCalls: choice.delta?.tool_calls,
+            role: choice.delta?.role,
             finishReason: choice.finish_reason ?? null,
             done: Boolean(choice.finish_reason),
           };
@@ -472,7 +482,6 @@ export async function embedText(provider, apiKey, text) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
       body: JSON.stringify({ model, prompt: text }),
-      redirect: 'error',
     });
     if (!res.ok) throw new Error(`Embedding failed with HTTP ${res.status}`);
     const json = await res.json();
@@ -483,7 +492,6 @@ export async function embedText(provider, apiKey, text) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
     body: JSON.stringify({ model, input: text }),
-    redirect: 'error',
   });
   if (!res.ok) throw new Error(`Embedding failed with HTTP ${res.status}`);
   const json = await res.json();

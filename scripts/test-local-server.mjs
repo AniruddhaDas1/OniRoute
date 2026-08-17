@@ -258,8 +258,15 @@ async function runTests() {
   const streamText = await streamRes.text();
   assert(streamText.includes('data:'), 'Stream contains valid SSE data: events');
   assert(streamText.includes('chat.completion.chunk'), 'Stream chunks contain object: chat.completion.chunk');
+  assert(streamText.includes('"role":"assistant"'), 'Stream starts with standard role: assistant chunk');
   assert(streamText.includes('"finish_reason":"stop"'), 'Stream contains proper finish_reason: "stop"');
   assert(streamText.includes('data: [DONE]'), 'Stream properly terminates with data: [DONE]');
+
+  const toolCallDelta = parseProviderStreamLine(
+    { provider_type: 'openai' },
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_123","type":"function","function":{"name":"search","arguments":"{}"}}]},"finish_reason":null}]}',
+  );
+  assert(toolCallDelta?.toolCalls?.[0]?.function?.name === 'search', 'OpenAI tool_calls stream chunk parsed cleanly');
   console.log('');
 
   console.log('====================================================');

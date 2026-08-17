@@ -11,10 +11,14 @@ export interface ChatMessage {
 
 export interface CompletionOptions {
   maxTokens?: number;
+  max_completion_tokens?: number;
   temperature?: number;
   topP?: number;
   stop?: string[];
   stream?: boolean;
+  tools?: any[];
+  tool_choice?: any;
+  response_format?: any;
 }
 
 export interface ProviderRequest {
@@ -25,6 +29,7 @@ export interface ProviderRequest {
 
 export interface ProviderResponse {
   content: string;
+  tool_calls?: any[];
   model: string;
   finishReason: string;
   usage?: TokenUsage;
@@ -32,6 +37,8 @@ export interface ProviderResponse {
 
 export interface StreamDelta {
   text?: string;
+  toolCalls?: any[];
+  role?: string;
   finishReason?: string | null;
   done?: boolean;
 }
@@ -338,9 +345,13 @@ export function buildProviderRequest(
           messages,
           stream,
           max_tokens: options.maxTokens,
+          max_completion_tokens: options.max_completion_tokens,
           temperature: options.temperature,
           top_p: options.topP,
           stop: options.stop,
+          tools: options.tools,
+          tool_choice: options.tool_choice,
+          response_format: options.response_format,
         })),
       };
   }
@@ -390,6 +401,7 @@ export function parseProviderResponse(provider: ApiProvider, responseBody: any):
       const choice = responseBody.choices?.[0];
       return {
         content: choice?.message?.content ?? '',
+        tool_calls: choice?.message?.tool_calls,
         model: responseBody.model || provider.model_name,
         finishReason: choice?.finish_reason || 'stop',
         usage: usageFrom(responseBody.usage?.prompt_tokens, responseBody.usage?.completion_tokens),
@@ -402,6 +414,7 @@ export function parseProviderResponse(provider: ApiProvider, responseBody: any):
       const choice = responseBody.choices?.[0];
       return {
         content: choice?.message?.content ?? '',
+        tool_calls: choice?.message?.tool_calls,
         model: responseBody.model || provider.model_name,
         finishReason: choice?.finish_reason || 'stop',
         usage: usageFrom(responseBody.usage?.prompt_tokens, responseBody.usage?.completion_tokens),
@@ -478,7 +491,9 @@ export function parseProviderStreamLine(provider: ApiProvider, line: string): St
         const choice = json.choices?.[0];
         if (choice) {
           return {
-            text: choice.delta?.content ?? '',
+            text: choice.delta?.content ?? (choice.delta?.tool_calls ? undefined : ''),
+            toolCalls: choice.delta?.tool_calls,
+            role: choice.delta?.role,
             finishReason: choice.finish_reason ?? null,
             done: Boolean(choice.finish_reason),
           };
@@ -503,7 +518,9 @@ export function parseProviderStreamLine(provider: ApiProvider, line: string): St
         const choice = json.choices?.[0];
         if (choice) {
           return {
-            text: choice.delta?.content ?? '',
+            text: choice.delta?.content ?? (choice.delta?.tool_calls ? undefined : ''),
+            toolCalls: choice.delta?.tool_calls,
+            role: choice.delta?.role,
             finishReason: choice.finish_reason ?? null,
             done: Boolean(choice.finish_reason),
           };
